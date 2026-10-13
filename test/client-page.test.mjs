@@ -222,6 +222,10 @@ const SIDEBAR = {
     ],
     total: { usd: 0.2144, amount: '¥1.5437', calls: 185, unpriced: 2 },
   },
+  // 输入区三块（T3）：宿主总是送补齐默认值的形状
+  sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
+  quotaStrip: { enabled: false, showBalance: true },
+  corner: { enabled: false, showTop1: false },
   basisIds: ['p1-03cb848a'],
 }
 function Report_now() { return Date.parse('2026-10-13T02:00:00Z') }
@@ -304,6 +308,7 @@ globalThis.fetch = async (url, init) => {
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys') ? { ok: true, data: KEYS }
+    : path.includes('/session?') ? { ok: true, data: sessionFixture(path.includes('includeSubagent=1')) }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
       : path.endsWith('/prices/update') ? { ok: true, data: { meta: { ...REPORT.prices.meta, accepted: 320 } } }
@@ -332,6 +337,39 @@ const ctx = {
   effect(fn, label) { effects.push({ fn, label }) },
 }
 entry.factory(requireStub).apply(ctx)
+
+/**
+ * `/session` 的响应夹具：`includeSubagent` 打开时多出「子代理」那一档、合计跟着变大。
+ * 形状与宿主 `summarizeSession()` 一致（金额是展示币种的字符串，token 是 5 桶 + total）。
+ */
+function sessionFixture(includeSubagent) {
+  const self = {
+    calls: 3, priced: 3, unpriced: 0, usd: 0.3, amount: '¥2.16', cost: '¥2.16',
+    tokens: { input: 1_000_000, output: 0, cacheRead: 4_000_000, cacheWrite: 0, reasoning: 0, total: 5_000_000 },
+    hitRate: 0.8,
+    models: [{ key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 3, usd: 0.3, amount: '¥2.16' }],
+  }
+  const zero = {
+    calls: 0, priced: 0, unpriced: 0, usd: 0, amount: '¥0', cost: null,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
+    hitRate: null, models: [],
+  }
+  const children = includeSubagent
+    ? {
+        ...self,
+        calls: 2, usd: 0.2, amount: '¥1.44', cost: '¥1.44',
+        tokens: { ...self.tokens, input: 500_000, total: 2_500_000 },
+        models: [{ key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 2, usd: 0.2, amount: '¥1.44' }],
+      }
+    : zero
+  const total = includeSubagent
+    ? { ...self, calls: 5, usd: 0.5, amount: '¥3.6', cost: '¥3.6', tokens: { ...self.tokens, input: 1_500_000, total: 7_500_000 } }
+    : self
+  return {
+    sessionId: 'sess-parent', date: '2026-10-13', includeSubagent: includeSubagent === true,
+    subagentSupported: true, self, children, total, firstAtMs: 1, lastAtMs: 2,
+  }
+}
 
 function component(name, index = 0) {
   const list = slots.get(name)
@@ -1175,6 +1213,89 @@ await (async () => {
   })
   SIDEBAR.modelCard = saved.modelCard
   try { globalThis.localStorage.removeItem('balance-monitor:model-card-open') } catch { /* 假的 localStorage 可能没实现 */ }
+  await reloadSidebar()
+})()
+
+console.log('\n[输入区三块：本会话费用 / 额度横条 / 右下角角标]')
+await (async () => {
+  const saved = { sessionCost: SIDEBAR.sessionCost, quotaStrip: SIDEBAR.quotaStrip, corner: SIDEBAR.corner }
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
+  // 会话数据是异步取的：先挂一次把数据拉回来再渲染断言
+  //（`test()` 是同步的，await 只能放在调用 test 之前 —— 这是本文件的老坑）
+  const renderSession = async (Component, props) => {
+    mount(Component, props)
+    await tick()
+    await tick()
+    return render(mount(Component, props))
+  }
+  // conversation.input.dock 注册了两个：index 0 = 本会话费用（order 4）、index 1 = 额度横条（order 5）
+  const composerSession = component('conversation.input.dock', 0).component
+  const headerSession = component('conversation.session.header.actions', 0).component
+  const strip = component('conversation.input.dock', 1).component
+  const corner = component('conversation.composer.dock', 0).component
+  try {
+    SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
+    await reloadSidebar()
+    const composerHtml = await renderSession(composerSession, { sessionId: 'sess-parent' })
+    const headerIdle = await renderSession(headerSession, { sessionId: 'sess-parent' })
+    test('本会话费用：金额 / 调用数 / token / 命中率；位置=composer 时标题栏那处不渲染', () => {
+      for (const needle of ['本会话 ¥2.16', '3 次', '5.0M tok', '命中 80.0%']) {
+        assert.ok(composerHtml.includes(needle), `缺少「${needle}」：${composerHtml.slice(0, 200)}`)
+      }
+      assert.ok(!headerIdle.includes('本会话'), '位置=composer 时标题栏那处不该渲染')
+      return '¥2.16 · 3 次 · 5.0M · 80.0%'
+    })
+    const noSession = await renderSession(composerSession, {})
+    test('宿主没给 sessionId（不是会话页）→ 不渲染', () => {
+      assert.equal(noSession.includes('本会话'), false, `没有会话 id 就不该有这一行：${noSession.slice(0, 120)}`)
+      return '不渲染'
+    })
+    SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: false, includeSubagent: true }
+    await reloadSidebar()
+    const agentHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
+    SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: true, includeSubagent: false }
+    await reloadSidebar()
+    const headerHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
+    const composerIdle = await renderSession(composerSession, { sessionId: 'sess-parent' })
+    test('位置改到 header → 轮到标题栏那处渲染', () => {
+      assert.ok(headerHtml.includes('本会话'), `标题栏应该渲染：${headerHtml.slice(0, 200)}`)
+      assert.ok(!composerIdle.includes('本会话'), '输入区那处应收起')
+      return 'header 生效'
+    })
+    SIDEBAR.quotaStrip = { enabled: true, showBalance: true }
+    SIDEBAR.corner = { enabled: true, showTop1: true }
+    await reloadSidebar()
+    const stripHtml = render(mount(strip, {}))
+    const cornerHtml = render(mount(corner, {}))
+    test('额度横条：今日 / 峰谷档位 / 余额三个 chip，且是按钮（点一下刷新）', () => {
+      for (const needle of ['今日 1.3997', '峰时', '余额 ¥1.51']) {
+        assert.ok(stripHtml.includes(needle), `横条缺少「${needle}」：${stripHtml.slice(0, 200)}`)
+      }
+      assert.ok(clickIn(strip, node => node.type === 'button' && render(node.props?.children).includes('今日')), 'chip 应是可点按钮')
+      return '3 个 chip · 可点'
+    })
+    test('右下角角标：今日 + 峰谷档位 + Top-1 模型', () => {
+      for (const needle of ['今日 1.3997', '峰时', 'Top-1 cn:deepseek-v4.1-flash']) {
+        assert.ok(cornerHtml.includes(needle), `角标缺少「${needle}」：${cornerHtml.slice(0, 200)}`)
+      }
+      return '角标三段'
+    })
+    SIDEBAR.quotaStrip = { enabled: false, showBalance: true }
+    SIDEBAR.corner = { enabled: false, showTop1: true }
+    SIDEBAR.sessionCost = { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false }
+    await reloadSidebar()
+    const stripOff = render(mount(strip, {}))
+    const cornerOff = render(mount(corner, {}))
+    const sessionOff = await renderSession(composerSession, { sessionId: 'sess-parent' })
+  } finally {
+    SIDEBAR.sessionCost = saved.sessionCost
+    SIDEBAR.quotaStrip = saved.quotaStrip
+    SIDEBAR.corner = saved.corner
+  }
   await reloadSidebar()
 })()
 
