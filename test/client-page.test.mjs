@@ -2138,5 +2138,64 @@ await (async () => {
   await reloadSidebar()
 })()
 
+console.log('\n[左侧栏：WorkBuddy 积分型 —— 今日那一行换单位，且不污染金额]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  const saved = { credits: SIDEBAR.credits, providers: SIDEBAR.providers }
+  try {
+    SIDEBAR.providers = [
+      ...SIDEBAR.providers.filter(item => item.provider !== 'wbfd'),
+      { provider: 'wbfd', displayName: 'wbfd', calls: 517, priced: 0, unpriced: 517, usd: 0, amount: 1.3997, tokens: 76_708_000, hitRate: 0.984 },
+    ]
+    SIDEBAR.credits = [{
+      provider: 'wbfd', displayName: 'wbfd', status: 'ok', period: 'today',
+      ownCredits: 137.42, ownCalls: 517, ownUnknown: 2, truncated: false,
+      siteCredits: 849.14, siteTokens: 900_000_000, siteHitRate: 99.1,
+      filter: { userAgent: 'deepseek-harness' },
+    }]
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+    /**
+     * 供应商选择是**组件内 state**，而本测试台架的 effect 只在挂载时跑一次，
+     * 所以不能靠 localStorage 让后面的挂载再选一次 —— 直接在活实例上触发 select 的
+     * onChange（`clickIn` 的手法），否则渲染出来永远停在「全部」。
+     */
+    let picked = false
+    mount(sidebar.component, {}, node => {
+      if (picked || node.type !== 'select') return
+      node.props?.onChange?.({ target: { value: 'wbfd' } })
+      picked = true
+    })
+    const html = render(mount(sidebar.component))
+    test('诊断：这次渲染确实切到了 wbfd', () => {
+      assert.equal(picked, true, '没找到侧栏的供应商 select')
+      assert.ok(html.includes('wbfd'), `未落在 wbfd：${html.slice(0, 200)}`)
+    })
+    test('今日那一行换成「积分」，且带上自身口径的数值', () => {
+      assert.ok(html.includes('137.42 积分'), `应有积分：${html.slice(0, 300)}`)
+      return '137.42 积分'
+    })
+    test('金额被替换掉，不是两行并列（积分不是钱，不能同时给一个 ¥ 数）', () => {
+      assert.equal(html.includes('今日¥1.3997'), false, `今日行不该再是金额：${html.slice(0, 300)}`)
+    })
+    test('站方全量只作对照、单独标注', () => {
+      assert.ok(html.includes('站方全量 849.14'), `应有站方对照：${html.slice(0, 300)}`)
+      return '站方全量 849.14'
+    })
+    test('过滤条件与「无积分记录」都写在旁注里（用户要能看见口径与缺口）', () => {
+      assert.ok(html.includes('deepseek-harness'), `应显示过滤条件：${html.slice(0, 300)}`)
+      assert.ok(html.includes('2 笔无积分记录'), `应显示缺 credit 的条数：${html.slice(0, 300)}`)
+      return '按 deepseek-harness 过滤 · 2 笔无积分记录'
+    })
+    test('未标记 truncated 时不出现「可能漏数」的告警（不无中生有）', () => {
+      assert.equal(html.includes('可能漏数'), false)
+    })
+  } finally {
+    SIDEBAR.credits = saved.credits
+    SIDEBAR.providers = saved.providers
+  }
+})()
+
 console.log(`\n${passed} 通过 / ${failed} 失败`)
 process.exit(failed === 0 ? 0 : 1)

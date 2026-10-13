@@ -39,6 +39,34 @@ const BILLING = {
 }
 const MODELS = { object: 'list', data: [{ id: 'grok-4.6' }, { id: 'grok-4.7' }, { id: 'grok-4.5' }] }
 
+// ── wbfd（WorkBuddy / 积分倍率型）的打桩：指纹在 /v1/models 的 credits，
+//    消耗在它自带的面板接口上（同一把 key）。八进制都不是，见 lib/workbuddy.js。
+const WB_MODELS = {
+  object: 'list',
+  data: [
+    { id: 'cn:deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', credits: 'x0.03' },
+    // 不带 credits 的聚合模型：界面要显示，但不计入指纹。
+    { id: 'cn:auto', name: 'Auto' },
+  ],
+}
+/** 站方口径：站长整个账号池（含所有买家）——**不等于**「我的」。 */
+const WB_PANEL_USAGE = {
+  totals: {
+    requests: 4300, credits: 849.14, credit_samples: 4200, credit_tokens: 842960000,
+    credits_per_1m_tokens: 1.0073, total_tokens: 900000000,
+    cache_hit_tokens: 891000000, cache_miss_tokens: 9000000, cache_hit_rate: 99.1,
+  },
+  credit_by_account: [{
+    key: '18366525060', realm: 'cn', requests: 720, credits: 230.27,
+    credit_samples: 720, credit_tokens: 192250000,
+    cache_hit_tokens: 190000000, cache_miss_tokens: 2250000, cache_hit_rate: 98.8,
+  }],
+}
+/** 逐请求归档：1.25 + 0.5 是真值，第三条 `credit_known:false` **不能当 0 计**。 */
+const WB_LOGS = { entries: [{ credit: 1.25, credit_known: true }, { credit: 0.5, credit_known: true }, { credit_known: false }], limit: 1000 }
+/** 只让「今天第一个窗口」返回数据：否则每个小时窗各回一遍，总数会随跑测时刻变化。 */
+const WB_TODAY_START_SEC = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)
+
 /** 站方口径价目（LiteLLM 形态）的打桩响应：结构守卫要求 ≥100 条，所以补一堆 filler。 */
 const LITELLM_SOURCE = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
 function liteLLMPayload() {
@@ -93,6 +121,21 @@ globalThis.fetch = async (url, init) => {
       },
     }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
+  const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  // ── wbfd：/v1/usage 是 404，消耗挂在自带面板上 ──
+  if (new URL(url).host === '114.66.62.99:7863') {
+    if (path.endsWith('/v1/usage')) {
+      return new Response(JSON.stringify({ error: { code: 'not_found_error', message: 'not found' } }), { status: 404, headers: { 'content-type': 'application/json' } })
+    }
+    if (path.endsWith('/v1/models')) return json(WB_MODELS)
+    if (path === '/panel/api/usage') return json(WB_PANEL_USAGE)
+    if (path === '/panel/api/request_logs') {
+      const from = Number(new URL(url).searchParams.get('from'))
+      return json(from === WB_TODAY_START_SEC ? WB_LOGS : { entries: [], limit: 1000 })
+    }
+  }
+
   const body = path.endsWith('/v1/usage') ? WALLET_USAGE
     : path.endsWith('/v1/sub2api/billing') ? BILLING
       : path.endsWith('/v1/models') ? MODELS
@@ -2071,6 +2114,92 @@ await test('真正坏掉的 JSON 仍是「JSON 解析失败」那条文案（与
   assert.equal(res.json.error, 'invalid json body')
   assert.equal(/过大/.test(res.json.error), false)
   return res.json.error
+})
+
+console.log('\n[WorkBuddy 型：切类型 → 读面板积分 → 侧栏展示]')
+await test('切到 workbuddy 后探测出「今日积分」（自身口径 + 站方口径分开）', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/type', { provider: 'wbfd', type: 'workbuddy' })
+  assert.equal(res.statusCode, 200)
+  const entry = res.json.state.providers.find(p => p.provider === 'wbfd')
+  assert.equal(entry.type, 'workbuddy')
+  assert.equal(entry.status, 'ok')
+  assert.equal(entry.workbuddy.ratedModelCount, 1, '指纹只认带 credits 的模型')
+  assert.equal(entry.workbuddy.models.length, 2, '不带 credits 的模型照样带出去')
+  // 1.25 + 0.5 = 1.75；第三条没有 credit 字段，**不能当 0 计**。
+  assert.equal(entry.workbuddy.own.credits, 1.75)
+  assert.equal(entry.workbuddy.own.unknown, 1)
+  assert.equal(entry.workbuddy.site.totals.credits, 849.14)
+  assert.equal(entry.workbuddy.period, 'today')
+  return `自身 ${entry.workbuddy.own.credits} / 站方 ${entry.workbuddy.site.totals.credits}`
+})
+await test('面板地址取 baseURL 的 origin（丢掉 /v1），且带同一把 key', () => {
+  const paths = seen.filter(item => new URL(item.url).host === '114.66.62.99:7863').map(item => new URL(item.url).pathname)
+  assert.ok(paths.includes('/panel/api/usage'), `实际路径：${paths.join(', ')}`)
+  assert.ok(paths.includes('/panel/api/request_logs'), `实际路径：${paths.join(', ')}`)
+  assert.ok(!paths.some(item => item.startsWith('/v1/panel')), '面板不在 /v1 下')
+  const panelCalls = seen.filter(item => new URL(item.url).pathname.startsWith('/panel/'))
+  assert.ok(panelCalls.every(item => item.auth === 'Bearer sk-test-wbfd'), '面板鉴权与 API 同口径，必须带 key')
+  return `面板请求 ${panelCalls.length} 次，全部带 key`
+})
+await test('自身口径默认按 deepseek-harness 过滤（即「只算我的」）', async () => {
+  const res = await call('GET', '/plugins/dsh-balance-monitor/state')
+  const entry = res.json.state.providers.find(p => p.provider === 'wbfd')
+  assert.deepEqual(entry.creditsFilter, { userAgent: 'deepseek-harness' })
+  const filtered = seen.filter(item => new URL(item.url).searchParams.get('user_agent') === 'deepseek-harness')
+  assert.ok(filtered.length > 0, '归档查询必须带上 UA 过滤，否则读到的是全站')
+  return 'userAgent=deepseek-harness'
+})
+await test('类型落盘（重启用）', () => {
+  const parsed = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
+  assert.equal(parsed.types.wbfd, 'workbuddy')
+})
+await test('POST /credits/filter 改过滤条件 → 立刻重探并回显', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/credits/filter',
+    { provider: 'wbfd', userAgent: 'my-tool', clientIp: '203.0.113.7' }, { 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 200)
+  const entry = res.json.state.providers.find(p => p.provider === 'wbfd')
+  assert.deepEqual(entry.creditsFilter, { userAgent: 'my-tool', clientIp: '203.0.113.7' })
+  const parsed = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
+  assert.deepEqual(parsed.creditsFilters.wbfd, { userAgent: 'my-tool', clientIp: '203.0.113.7' })
+  const both = seen.filter(item => new URL(item.url).searchParams.get('user_agent') === 'my-tool')
+  assert.ok(both.some(item => new URL(item.url).searchParams.get('client_ip') === '203.0.113.7'), 'IP 条件要一起下发')
+  return 'userAgent=my-tool · clientIp=203.0.113.7'
+})
+await test('过滤条件传空串 = 清掉该项（回落默认 UA）', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/credits/filter',
+    { provider: 'wbfd', userAgent: '' }, { 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 200)
+  const entry = res.json.state.providers.find(p => p.provider === 'wbfd')
+  assert.equal(entry.creditsFilter.userAgent, 'deepseek-harness')
+  assert.equal(entry.creditsFilter.clientIp, '203.0.113.7', '只改 UA 时 IP 条件要保留')
+  return JSON.stringify(entry.creditsFilter)
+})
+await test('未知供应商 → 404', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/credits/filter', { provider: 'nope', userAgent: 'x' })
+  assert.equal(res.statusCode, 404)
+})
+await test('侧栏带出积分块（自身 + 站方，且不并进任何金额）', async () => {
+  const res = await call('GET', '/plugins/dsh-balance-monitor/sidebar')
+  assert.equal(res.statusCode, 200)
+  const rows = res.json.data.credits
+  assert.ok(Array.isArray(rows) && rows.length === 1, `实际：${JSON.stringify(rows)}`)
+  const row = rows[0]
+  assert.equal(row.provider, 'wbfd')
+  assert.equal(row.ownCredits, 1.75)
+  assert.equal(row.ownCalls, 3)
+  assert.equal(row.siteCredits, 849.14)
+  assert.equal(row.period, 'today')
+  // 积分不是钱：它必须**不在**任何金额字段里。
+  assert.equal(row.usd, undefined)
+  assert.equal(row.amount, undefined)
+  assert.ok(!Object.keys(res.json.data.total).includes('credits'), '总额里不能混进积分')
+  return `own=${row.ownCredits} site=${row.siteCredits}`
+})
+await test('侧栏的 credits 只读内存缓存，不再打面板（轮询不许放大探测）', async () => {
+  const before = seen.filter(item => new URL(item.url).pathname.startsWith('/panel/')).length
+  await call('GET', '/plugins/dsh-balance-monitor/sidebar')
+  const after = seen.filter(item => new URL(item.url).pathname.startsWith('/panel/')).length
+  assert.equal(after, before, `侧栏轮询不该新增面板请求：${before} → ${after}`)
 })
 
 rmSync(sandbox, { recursive: true, force: true })

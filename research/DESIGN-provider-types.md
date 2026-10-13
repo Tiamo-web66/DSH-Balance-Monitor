@@ -86,7 +86,7 @@ GET https://walkcoding.top/v1/usage    Authorization: Bearer sk-5c43…
 | **New API 系**（原版 one-api/new-api） | `GET /api/status` 200 且含 `quota_per_unit`；`GET /api/pricing` 200 且含 `group_ratio` | `/dashboard/billing/subscription`（sk- 可读，但 `*_limit_usd` 是**总额度**不是余额） | `/dashboard/billing/usage`；new-api 另有 `/api/usage/token/` 给原始 quota 整数 | `/api/pricing` 的 `group_ratio`（**免鉴权**，但本批 6 家一个都没有） | ⚠️ 这 6 家里**一家都不是**，仅源码级结论 |
 | **钱包余额型**（我建议就用这个名字，替代含糊的 "Sub"） | `GET /v1/usage` 200 且 `mode=unrestricted` + `planName` 存在 | ✅ `balance` / `remaining` + `unit` | ✅ `usage.total.actual_cost`，且 `usage.today` / `daily_usage[]` 可做日曲线 | ✅ `actual_cost/cost`，且 `model_stats[]` 给逐模型 | ✅ walkcoding.top / st.walkcoding.top / nanshanyougui.xyz **三家同款**，一个适配器通吃 |
 | **订阅配额型** | `GET /v1/usage` 200 且 `mode=quota_limited` + `quota.limit` 存在 | ✅ `quota.remaining` + `unit` | ✅ `quota.used` / `quota.limit`（百分比） | ✅（同法） | ✅ jiuhaoche（`expires_at: 2027-02-10`，剩 122 天，套餐 5644.84 USD 已用 99.75%） |
-| **WorkBuddy / 积分倍率型** | `/v1/usage` 404，但 `/v1/models` 每模型带 `credits` | ❌ 无 | ❌ 无（只能本地 token 估算） | ✅ 直接读：`credits: "x0.79"` | ✅ wbfd（114.66.62.99:7863） |
+| **WorkBuddy / 积分倍率型** | `/v1/usage` 404，但 `/v1/models` 每模型带 `credits` | ❌ 无 | ✅ **已落地**：同一把 key 读它自带面板的 `/panel/api/usage`（站方全量）与 `/panel/api/request_logs`（按 `client_ip`/`user_agent` 过滤 = 自身口径）；真值 `usage.credit` 逐请求落归档 | ✅ 直接读：`credits: "x0.79"` | ✅ wbfd（114.66.62.99:7863），实现见 `lib/workbuddy.js` / README 第一节 |
 
 > 关于 "New"：你列表里有它，但这批 6 家**没有一家是原版 New API**——`/api/status`、`/api/pricing`、`/api/ratio_config` 全线 404/400。所以 New 型适配器只能按源码契约先写，等你给出真正跑 New API 的站再验。
 

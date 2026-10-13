@@ -7,8 +7,11 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 
 - **其他**（默认）：什么都不做，与原行为完全一致。
 - **Sub2Api**：用该供应商自己的 API Key 查询**额度 / 倍率 / 模型**，并按 `官方价 × 生效倍率` 算出**花费**。
+- **WorkBuddy（积分）**：给「积分倍率型」站（`workbuddy2api-panel` 系）读**今日积分** ——
+  这类站 `/v1/usage` 是 404，但倍率挂在 `/v1/models[].credits`，消耗在它**自带的管理面板**接口上
+  （同一把 key，见第三节）。积分**不折算货币、不进任何金额合计**。
 
-只支持 Sub2Api 一种中转站类型（按用户决定，`New API` 类型暂不做）。
+除 Sub2Api 外还支持 WorkBuddy 一种站方类型（`New API` 类型暂不做）。
 
 ### 0.8.0：按 `dsh-cost-meter` 补齐界面 —— T1 档
 
@@ -116,6 +119,42 @@ margin     = 0 auto
 0.7.0 起不只标「不一致」，还给出**结构化原因**（宿主管算事实、客户端按语言拼句子）：差多少倍、
 高还是低、倍率接口是不是报的 1（＝多半不按「官方价 × 倍率」这条公式计费）、
 以及逐模型反推倍率的区间（＝站方按模型逐个定价）。
+
+### WorkBuddy 型（积分倍率站）
+
+上游项目：[`Sliverkiss/workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api) 系分支
+`workbuddy2api-panel`：把 CodeBuddy 账号包装成 OpenAI 兼容网关，**自带一个 Web 管理面板**。
+指纹与数据源（已实测）：
+
+| 接口 | 拿到什么 |
+|---|---|
+| `GET {base}/v1/usage` | **404** —— 不是 Sub2Api，没有额度接口 |
+| `GET {base}/v1/models` | 模型清单，每个模型带 **`credits`** 积分倍率（`"x0.79"`）—— 这是指纹 |
+| `GET {origin}/panel/api/usage` | **站方口径**：整个账号池（含所有买家）的积分、缓存命中/未命中 token、逐账号与逐模型分解 |
+| `GET {origin}/panel/api/request_logs` | 逐请求归档：**`credit` 真值** + 调用来源 `client_ip` / `user_agent` |
+
+面板与 `/v1/*` **共用同一把 `api_key`**（面板走同一个 `httpauth.VerifyBearer`），所以一把 key 既能对话也能读账。
+面板地址取 `baseURL` 的 **origin**（丢掉 `/v1`）。
+
+**两个口径必须分开，不能混**：
+
+- **自身口径**（界面「今日」用的就是这个）：`request_logs` 按 `client_ip` / `user_agent` **包含匹配**过滤后
+  求和。默认过滤串是 `deepseek-harness`（DSH 自己的出站 UA 前缀），所以**默认就是「只算我的」**。
+  改条件：`POST /plugins/dsh-balance-monitor/credits/filter { provider, userAgent?, clientIp? }`，传空串清掉该项。
+- **站方口径**：`panel/api/usage` 的 `totals.credits` 是**站长整个账号池**的量，包含所有买家 ——
+  界面只把它当对照显示（「站方全量」），**不当成「我的消耗」**。
+
+三个会**静默算错**的边界，代码里都如实标出来：
+
+1. `request_logs` 的 `limit` 上限 1000 且**没有分页**（对端只取归档尾部最近 N 条）→ 按小时切窗逐个读；
+   某窗返回满 1000 条即标记 `truncated`，界面提示「可能漏数」，**不假装完整**。
+2. `credit_known` 区分「上游返回了真 0」与「上游没给 credit 字段」→ 后者单独计数（`ownUnknown`），
+   **不当 0**，也不当完整。
+3. 归档默认只留 7 天（`logging.request_retention_days`）→ 只有「今日」这种窗口可靠。
+
+**积分不是钱**：这类站没有余额接口，也没有可用于换算的基准价，所以积分**既不折算货币、也不并入
+任何金额合计**（侧栏的「今日积分」是替换掉那一行的数值，`total.usd` / 模型花费卡片一个字节都不动）。
+侧栏的积分块**只读内存缓存、不额外打面板** —— 侧栏是常驻轮询，每次轮询都去问一遍会把探测节奏放大。
 
 ### DeepSeek 的**两条路线**（0.6.0 新增：余额可点击切换）
 
@@ -306,7 +345,7 @@ POST /plugins/dsh-balance-monitor/vision/apply { provider? }    ← 省略 provi
 本插件自己持久化的只有两件事（「类型」和「自动补图片」开关）：
 
 ```
-$DSH_HOME/storages/dsh-balance-monitor/state.json     ← 类型 / 自动补图片 / 展示币种 / 保留期 / 价表覆盖
+$DSH_HOME/storages/dsh-balance-monitor/state.json     ← 类型 / 自动补图片 / 展示币种 / 保留期 / 价表覆盖 / WorkBuddy 过滤条件
 $DSH_HOME/storages/dsh-balance-monitor/ledger.json    ← 调用账本（按天，含依据指纹；默认保留 7 天）
 $DSH_HOME/storages/dsh-balance-monitor/days.json      ← 日汇总（本月/累计用；默认保留 400 天，覆盖式写入）
 $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（点「更新价格表」后写入）
@@ -317,7 +356,8 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 ```json
 {
   "version": 2,
-  "types": { "walk-grok": "sub2api" },
+  "types": { "walk-grok": "sub2api", "wbfd": "workbuddy" },
+  "creditsFilters": { "wbfd": { "userAgent": "deepseek-harness", "clientIp": "203.0.113.7" } },
   "autoImage": { "pojia-gpt": false },
   "display": { "currency": "CNY", "symbol": "¥", "decimals": 4, "exchangeRate": 7.2 },
   "budget": { "enabled": false, "amount": null, "period": "month" },
@@ -491,7 +531,10 @@ function brandString(value) { return value }   // brand 只存在于编译期
 
 - `redirect: 'manual'` + 显式拒绝 3xx —— 防止 `Authorization` 头被带到重定向目标主机
 - 响应体上限 512 KiB，流式计字节、不信 `Content-Length`（SPA 回落页可能有几十 KB）
-- HTTPS 之外一律不发；出网只可能是 `baseURL` 推导出的 `/v1/usage`、`/v1/sub2api/billing`、`/v1/models`
+- HTTPS 之外一律不发；出网只可能是 `baseURL` 推导出的端点 —— Sub2Api 型是 `/v1/usage`、
+  `/v1/sub2api/billing`、`/v1/models`；WorkBuddy 型是 `/v1/usage`（判指纹）、`/v1/models`、
+  以及**同一 origin 下**的 `/panel/api/usage`、`/panel/api/request_logs`（面板地址由 `baseURL`
+  取 origin 得到，不接受额外主机；未选这两类时不发任何站方请求）
 
 ---
 
@@ -509,9 +552,10 @@ $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs �
 $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（47 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
+$NODE test/workbuddy.test.mjs        # WorkBuddy 适配器（15 个用例，fetch 全打桩）：指纹判定、面板用量解析、归档窗口切分、credit 缺失不按 0 计
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（105 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（70 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys、/credits/filter）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（131 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（110 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -550,10 +594,11 @@ lib/usage-ledger.js        用量账本 + 侧栏/报表聚合：按天/按供应
 lib/billing-stream.js `llm/stream` 计费包裹：usage 捕获、嵌套只记一次、提前中断关流（零依赖）
 lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名单）与账号（平台 get_user_summary + 推理域兜底）
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
+lib/workbuddy.js      WorkBuddy / 积分型适配器：面板地址归一、指纹判定、站方用量解析、归档按窗口求和（零依赖，可用任意 fetchImpl 测）
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」+ 输入区三块（本会话费用 / 额度横条 / 右下角角标）等槽位
 lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
-test/*.mjs            九套用例，离线门槛 394 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
+test/*.mjs            十套用例，离线门槛 487 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ workbuddy（纯函数，fetch 全打桩）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -567,9 +612,12 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 
 1. **只认 Sub2Api 计费口径**。`New API` / `one-api` 系**没有适配器**（选「其他」即完全不碰）——
    `research/relay-endpoint-map-newapi-oneapi.md` 里已有接口清单与源码级结论，落地还差一个适配器。
-2. **积分倍率型站（wbfd 这类）折算不出钱**。这类站 `/v1/usage` 是 404、只有 `/v1/models[].credits`
-   （如 `"x0.11"`），既无余额也无「官方价」，只能给**相对量**（`creditsWeight()`）。
-   换货币要站点未公开的基准价，本模块**不猜**。
+2. **积分倍率型站（wbfd 这类）折算不出钱** —— 但**积分本身现在能读了**。这类站 `/v1/usage` 是 404、
+   只有 `/v1/models[].credits`（如 `"x0.11"`），既无余额也无「官方价」，所以**换货币仍然不可能**
+   （要站点未公开的基准价，本模块**不猜**）。0.8.0 起新增 `workbuddy` 类型：走它自带面板的
+   `/panel/api/usage` 与 `/panel/api/request_logs`（同一把 key）读**今日积分**，见第一节。
+   注意两点限制：面板归档只留 7 天、单次上限 1000 条无分页；`creditsWeight()` 那条纯本地估算
+   路径**没有标定过**，只作兜底展示，不要拿它当账（积分几乎全由缓存未命中贡献，按总量线性加权会系统性高估）。
 3. **余额只有 DeepSeek 两条路线有接口**。中转站没有余额端点 → 侧栏不显示那一行，
    官方余额也只在 `api.deepseek.com` 域名上查（白名单，防 key 被送到别处）。
 4. **多 key 的发现面仍不完整**。候选名扫描（默认 18 个）＋ `~/.dsh/.credentials.yaml` 的
@@ -719,8 +767,18 @@ const call = priceCall({ buckets, tier: resolved.tier, rate: resolved.rate, cred
 ### credits 型站（wbfd 这类）
 
 这类站 `/v1/usage` 是 404、只有 `/v1/models[].credits`（如 `"x0.11"`），没有余额也没有
-「官方价」，所以只能给出**相对量**（`creditsWeight()` = 全部桶 × credits）；换算出货币需要
-站点未公开的基准价，本模块不猜。`probeSub2Api()` 已把 `credits` 原样带出（`probe.models`）。
+「官方价」，所以**折算货币仍然不可能**。两条路，别混：
+
+| 路径 | 何时用 | 可信度 |
+|---|---|---|
+| **面板真值**（`lib/workbuddy.js`，类型选 `workbuddy`） | 对端是 `workbuddy2api-panel` 系、面板可读 | 真值：`usage.credit` 由站方自己记的逐请求扣费 |
+| **纯本地估算**（`creditsWeight()` = 全部桶 × credits） | 面板读不到时的兜底展示 | **相对量，未标定** —— 积分几乎全由缓存未命中贡献，把命中 token 按同价线性加权会系统性高估 |
+
+`creditsWeight()` 之所以只能算相对量，是因为它拿不到「命中单价 / 未命中单价 / 输出单价」这三个数：
+面板给出的 `积分/1M token` 是个**混合平均值**，代入自己的命中率会差出数倍
+（实测：站均值 99.1% 命中 → 1.0073 积分/1M；同一站自己的负载 98.4% 命中 → 同一批 token 的实际积分高约 44%）。
+要把它变成可用的账，得先解出那三个单价 —— 面板的 `credit_by_account` / `credit_by_model`
+带 `credits` + `credit_tokens` + `cache_hit_tokens` + `cache_miss_tokens`，样本足够解线性方程。
 
 ### 默认价目表（`lib/price-table.js`，自动生成）
 
