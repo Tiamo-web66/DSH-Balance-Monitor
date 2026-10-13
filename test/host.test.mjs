@@ -924,24 +924,27 @@ await test('配置重载后预算额度仍是 null（loadStore 不能被 Number(
 })
 
 await test('POST /config：峰谷提醒是局部覆盖，两个都关就清掉这条配置', async () => {
+  // 宿主下发的形状总是补齐默认值（界面直接编辑它）；文件里只落在默认为不同的键
+  const shape = (enabled, system) => ({ enabled, system, leadMinutes: 2, type: 'both', position: 'corner' })
   const enabled = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: true } })
-  assert.deepEqual(enabled.json.data.peakNotify, { enabled: true, system: false })
+  assert.deepEqual(enabled.json.data.peakNotify, shape(true, false))
   // 只改 system 时，enabled 必须保住（客户端两个勾选框各自提交一位）
   const system = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { system: true } })
-  assert.deepEqual(system.json.data.peakNotify, { enabled: true, system: true }, '局部覆盖不能把另一位带掉')
+  assert.deepEqual(system.json.data.peakNotify, shape(true, true), '局部覆盖不能把另一位带掉')
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
-  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).peakNotify, { enabled: true, system: true }, '要落盘')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).peakNotify, { enabled: true, system: true },
+    '落盘只写与默认不同的键（提前量/类型/位置是默认值，不写）')
   // 侧栏与报表都要带上开关：侧栏据此决定跨档时弹不弹
-  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.notify, { enabled: true, system: true })
-  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.notify, { enabled: true, system: true })
+  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.notify, shape(true, true))
+  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.notify, shape(true, true))
   // 非法值不写坏配置
   const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: 'yes' } })
-  assert.deepEqual(junk.json.data.peakNotify, { enabled: true, system: true }, '非法值保持原值')
+  assert.deepEqual(junk.json.data.peakNotify, shape(true, true), '非法值保持原值')
   // 两个都关 = 「没配」
   await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: false, system: false } })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).peakNotify, undefined, '都关 = 文件里不留一条')
   const cleared = await call('GET', '/plugins/dsh-balance-monitor/report')
-  assert.deepEqual(cleared.json.data.notify, { enabled: false, system: false })
+  assert.deepEqual(cleared.json.data.notify, shape(false, false))
   return '局部覆盖 · 都关即清空'
 })
 
@@ -1074,6 +1077,44 @@ await test('POST /config：ui 是局部补丁，只沉淀与默认不同的字�
     { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).ui, undefined, '回默认 = 文件里不留一条')
   return '局部补丁 · 非法保持 · null 回默认'
+})
+
+await test('峰谷提醒：提前量 / 类型 / 位置是局部补丁，非法值保持原值，全默认不留条', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    peakNotify: { enabled: true, leadMinutes: 5, type: 'peak', position: 'center' },
+  })
+  assert.deepEqual(saved.json.data.peakNotify,
+    { enabled: true, system: false, leadMinutes: 5, type: 'peak', position: 'center' },
+    '宿主总是给补齐默认值的形状（界面直接编辑它）')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).peakNotify,
+    { enabled: true, leadMinutes: 5, type: 'peak', position: 'center' },
+    '文件里只落在默认为不同的键（system=false 不写）')
+  // 局部补丁：只改位置，不带掉提前量与类型
+  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { position: 'corner' } })
+  assert.equal(patched.json.data.peakNotify.position, 'corner')
+  assert.equal(patched.json.data.peakNotify.leadMinutes, 5, '提前量要保住')
+  assert.equal(patched.json.data.peakNotify.type, 'peak', '类型要保住')
+  // 非法值保持原值（越界提前量 / 不认识的类型 / 不认识的位置）
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    peakNotify: { leadMinutes: 99, type: 'nope', position: 'middle' },
+  })
+  assert.equal(junk.json.data.peakNotify.leadMinutes, 5, '越界提前量保持原值')
+  assert.equal(junk.json.data.peakNotify.type, 'peak', '不认识的类型保持原值')
+  assert.equal(junk.json.data.peakNotify.position, 'corner', '不认识的位置保持原值')
+  // 全部回到默认值（含提前量与类型）→ 文件里不留条；
+  // 注意「关掉提醒」不会顺手把提前量重置 —— 那是独立设置，用户下次打开还得是他配的值
+  const offOnly = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: false, system: false } })
+  assert.deepEqual(offOnly.json.data.peakNotify,
+    { enabled: false, system: false, leadMinutes: 5, type: 'peak', position: 'corner' },
+    '关掉开关不影响提前量 / 类型')
+  const allDefault = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    peakNotify: { enabled: false, system: false, leadMinutes: 2, type: 'both', position: 'corner' },
+  })
+  assert.deepEqual(allDefault.json.data.peakNotify,
+    { enabled: false, system: false, leadMinutes: 2, type: 'both', position: 'corner' })
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).peakNotify, undefined, '全默认 = 文件里不留一条')
+  return '局部补丁 · 非法保持 · 全默认不留条'
 })
 
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {

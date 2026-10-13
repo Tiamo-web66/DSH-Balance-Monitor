@@ -267,9 +267,25 @@ Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   writable: true,
 })
+/** window 上的监听器（focus 等）：侧栏靠 focus 事件补一次取数，测试要能主动触发它。 */
+const windowListeners = new Map()
+function dispatchWindowEvent(event) {
+  let fired = 0
+  for (const handler of windowListeners.get(event) ?? []) {
+    try { handler() } catch { /* 单个 handler 出错不影响测试继续 */ }
+    fired += 1
+  }
+  return fired
+}
 globalThis.window = {
   __ModuleLoader__: { load(entry) { globalThis.window.__MODULE_ENTRY__ = entry } },
-  addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+  addEventListener(event, handler) {
+    const set = windowListeners.get(event) ?? new Set()
+    set.add(handler)
+    windowListeners.set(event, set)
+  },
+  removeEventListener(event, handler) { windowListeners.get(event)?.delete(handler) },
+  dispatchEvent() {},
 }
 globalThis.fetch = async (url, init) => {
   const path = String(url)
@@ -759,6 +775,48 @@ await (async () => {
     assert.deepEqual(body.ui, { hideOfficialBalance: true }, `实际提交：${hit.body}`)
     return 'POST /config { ui: { hideOfficialBalance: true } }'
   })
+  // 峰谷提醒：提前量 / 类型 / 位置三个控件各自独立保存
+  const leadTyped = mount(CostPage, {}, node => {
+    if (node.type === 'input' && node.props?.min === '1' && node.props?.max === '30') node.props.onChange({ target: { value: 7 } })
+  })
+  await tick()
+  await tick()
+  const leadSaved = clickText(mount(CostPage), '保存提前量')
+  await tick()
+  await tick()
+  test('改提前量 → POST /config { peakNotify: { leadMinutes: 7 } }（只提交这一位）', () => {
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.peakNotify, { leadMinutes: 7 }, `实际提交：${hit.body}`)
+    assert.equal(body.ui, undefined, '不该顺手提交界面偏好')
+    return 'POST /config { peakNotify: { leadMinutes: 7 } }'
+  })
+  const typePicked = mount(CostPage, {}, node => {
+    if (node.type === 'select' && String(node.props?.value) === 'both') node.props.onChange({ target: { value: 'peak' } })
+  })
+  await tick()
+  await tick()
+  test('选提醒类型 → POST /config { peakNotify: { type: "peak" } }', () => {
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.peakNotify, { type: 'peak' }, `实际提交：${hit.body}`)
+    return 'POST /config { peakNotify: { type: "peak" } }'
+  })
+  test('预览弹窗：点「预览进入峰」→ 设置页里当场渲染真实组件（带「预览」标记）', () => {
+    assert.ok(clickText(mount(CostPage), '预览进入峰'), '没找到「预览进入峰」按钮')
+    const html = render(mount(CostPage))
+    assert.ok(html.includes('已进入高峰时段'), `预览应渲染真实提醒文案：${html.slice(-500)}`)
+    assert.ok(html.includes('预览'), '应带预览标记（别和真实触发混淆）')
+    return '预览进入峰 · 带预览标记'
+  })
+  test('预览进入谷同理，且点 × 能关掉', () => {
+    assert.ok(clickText(mount(CostPage), '预览进入谷'), '没找到「预览进入谷」按钮')
+    const html = render(mount(CostPage))
+    assert.ok(html.includes('已进入平价时段'), '应渲染进入谷的文案')
+    assert.ok(clickIn(CostPage, node => node.type === 'button' && render(node.props?.children) === '×'), '应能关掉预览')
+    assert.ok(!render(mount(CostPage)).includes('已进入平价时段'), '关掉后不该还在')
+    return '预览进入谷 · 可关闭'
+  })
   // 宿主把空数组当**有效值**（`windows: []` = 永不判峰 → 所有调用按谷价计价），
   // 所以「清空输入框」必须解释成「沿用默认」，否则用户以为在恢复默认、其实改了计价。
   // 夹具改完要**逼 store 重新拉一次 /report**（fetch 是 JSON 往返的深拷贝，改夹具不会自动生效）——
@@ -945,6 +1003,79 @@ await (async () => {
     globalThis.localStorage.getItem = originalGetItem
     SIDEBAR.peak = saved.peak
     SIDEBAR.notify = saved.notify
+  }
+})()
+
+console.log('\n[峰谷提醒：提前量 / 类型过滤 / 位置 / 预览]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  const saved = { peak: SIDEBAR.peak, notify: SIDEBAR.notify }
+  const originalGetItem = globalThis.localStorage.getItem
+  // 「上一次看到的档位」设成与当前一致：不触发「刚跨过」那条路径，单独测提前量
+  globalThis.localStorage.getItem = key => (key === 'balance-monitor:peak-state' ? 'peak' : originalGetItem(key))
+  // store 已经加载过（前面的用例），改夹具后要让它重新取一次数：focus 事件正好是这条路径
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
+  try {
+    // 距下一个切换点 1 分钟（下一个是「进入谷」），提前量 2 分钟 → 应提前提醒
+    SIDEBAR.peak = { ...saved.peak, inPeak: true, nextAtMs: Date.now() + 60_000, nextIntoPeak: false, prevAtMs: 1 }
+    SIDEBAR.notify = { enabled: true, system: false, leadMinutes: 2, type: 'both', position: 'corner' }
+    await reloadSidebar()
+    test('提前量：距切换不足 2 分钟 → 弹「即将进入平价时段」（浮层，右下角）', () => {
+      const html = render(mount(sidebar.component))
+      assert.ok(html.includes('即将进入平价时段'), `应有提前提醒：${html.slice(0, 200)}`)
+      const popup = []
+      walk(mount(sidebar.component), node => { if (node.props?.style?.position === 'fixed') popup.push(node.props.style) })
+      assert.equal(popup.length, 1, `提醒应是一个浮层，实际 ${popup.length}`)
+      assert.equal(popup[0].right, 16, '默认贴在右下角')
+      assert.equal(popup[0].transform, undefined, '右下角不做水平位移')
+      return '即将进入平价时段 · 右下角浮层'
+    })
+    test('同一个切换点只提前提醒一次（记在本地，不再刷屏）', async () => {
+      const writes = localStorageWrites.filter(item => item.key === 'balance-monitor:peak-lead-at')
+      assert.equal(writes.length > 0, true, `应记下已提醒过的切换点：${JSON.stringify(localStorageWrites)}`)
+      return `已记 ${writes.at(-1).value}`
+    })
+    // 提醒是要用户自己关的，所以下一轮之前先关掉它，否则分不清「没弹」和「还挂着」
+    assert.ok(clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '×'), '应能关掉上一条提醒')
+    // 类型过滤：只提醒「进入峰」，而下一个切换点是进入谷 → 不提醒
+    SIDEBAR.peak = { ...saved.peak, inPeak: true, nextAtMs: Date.now() + 30_000, nextIntoPeak: false, prevAtMs: 1 }
+    SIDEBAR.notify = { enabled: true, system: false, leadMinutes: 2, type: 'peak', position: 'corner' }
+    await reloadSidebar()
+    test('提醒类型 = 只提醒进入峰 → 下一个是进入谷，不弹', () => {
+      const html = render(mount(sidebar.component))
+      assert.ok(!html.includes('即将进入平价时段'), `不该弹：${html.slice(0, 200)}`)
+      return 'type=peak 时进入谷不提醒'
+    })
+    // 位置：屏幕中心
+    SIDEBAR.peak = { ...saved.peak, inPeak: true, nextAtMs: Date.now() + 30_000, nextIntoPeak: false, prevAtMs: 1 }
+    SIDEBAR.notify = { enabled: true, system: false, leadMinutes: 2, type: 'both', position: 'center' }
+    await reloadSidebar()
+    test('弹窗位置 = 屏幕中心 → 浮层带 left 50% + translateX(-50%)', () => {
+      const styles = []
+      walk(mount(sidebar.component), node => { if (node.props?.style?.position === 'fixed') styles.push(node.props.style) })
+      assert.equal(styles.length, 1, '应有一个浮层')
+      assert.equal(styles[0].left, '50%')
+      assert.equal(styles[0].transform, 'translateX(-50%)')
+      assert.equal(styles[0].right, 'auto')
+      return 'left 50% · translateX(-50%)'
+    })
+    // 关掉提醒 → 横幅一起收掉
+    SIDEBAR.notify = { enabled: false, system: false, leadMinutes: 2, type: 'both', position: 'center' }
+    await reloadSidebar()
+    test('关掉提醒开关 → 挂着的横幅一起收起（不留残影）', () => {
+      const html = render(mount(sidebar.component))
+      assert.ok(!html.includes('即将进入平价时段'), '关掉后不该还有横幅')
+      return '已收起'
+    })
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem
+    SIDEBAR.peak = saved.peak
+    SIDEBAR.notify = saved.notify
+    await reloadSidebar()
   }
 })()
 
