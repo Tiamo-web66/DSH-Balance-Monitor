@@ -70,7 +70,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存 |
+| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写） |
 
 **本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
 `storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
@@ -219,6 +219,7 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   "display": { "currency": "CNY", "symbol": "¥", "decimals": 4, "exchangeRate": 7.2 },
   "budget": { "enabled": false, "amount": null, "period": "month" },
   "retention": { "ledgerDays": 7, "rollupDays": 400 },
+  "peakNotify": { "enabled": true, "system": false },
   "priceSources": ["official", "station", "manual"],
   "priceTable": { "models": { }, "providers": { }, "aliases": { } }
 }
@@ -229,6 +230,9 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `retention`：两份文件的保留天数（`ledgerDays` 账本明细 / `rollupDays` 日汇总），设置页「显示」可改；
   两者都能省，允许 `1 – 3650`，且**日汇总不会短于明细**（不合法就各自回落默认）。
   调小**立刻**裁掉超期数据（`POST /config` 时同步裁剪并落盘），调大只影响之后的留存。
+- `peakNotify`：峰谷提醒开关（`enabled` 侧栏横幅 / `system` 系统通知），设置页「显示」可改。
+  两位都是**局部覆盖**：只提交一位不会把另一位带掉；两个都关 = 清掉这条配置。默认都关（不弹）。
+  判定跟着侧栏 30s 轮询走，且只对**刚发生**的换档提醒（90s 内）——页面关着跨过的那次只记不报。
 - `priceSources`：允许参与计价的来源等级（第八节）；不写就是 `official + station + manual`。
 - `priceTable`：整段覆盖默认价表（默认表见第八节）；不写就用随包的默认表（官方快照 + 站方快照）。
 - `ledger.json` / `days.json` / `prices.json`：账本 / 日汇总 / 站方价目；账本**只加总不重算**。
@@ -299,7 +303,7 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 283 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 289 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（68 个用例）：官方峰谷（含未来切换点）、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
@@ -309,8 +313,8 @@ $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（40 �
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（31 个用例）
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（72 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（20 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（73 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（25 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -320,7 +324,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 283 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 289 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -351,7 +355,7 @@ lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名�
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices）
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
-test/*.mjs            九套用例，离线门槛 283 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 289 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -375,8 +379,10 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
    命名不合规律的扫不到，要靠 `state.json` 的 `deepseekKeys` 手填。
 5. **`official` 价目只有 20 条**（DeepSeek 主表 4 + 厂商文档 16），其余 557 条落在
    `reseller` / `aggregator` / `unknown` 三档，默认**不参与计价**（见第八节）。没命中的模型就是未定价。
-6. **峰谷没有提醒**。判定、相位、侧栏倒计时、**一键预览切换点**都有（`lib/pricing.js` 本地算官方窗口
-   + 周末全谷 + 调休表），但**弹窗提醒与系统通知没有**——`lib/` 与 `locale/` 里搜不到任何通知调用。
+6. **峰谷提醒的粒度是 30 秒**。判定、相位、侧栏倒计时、一键预览切换点、跨档提醒（侧栏横幅 +
+   可选系统通知）都有；但提醒是**跟着侧栏 30s 轮询**在客户端比出来的，所以：
+   切换点最多晚 30s 才提示；页面没开着就不会提醒（下次打开只记不报，不补报几小时前的换档）；
+   系统通知要浏览器授权（被拒就只剩横幅）。要做秒级提醒得在宿主侧挂定时器，本插件不这么做。
 7. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
 8. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
 
@@ -433,6 +439,17 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 - `windows` 是 **UTC 小时**、半开区间 `[start, end)`；`{1,4}`+`{6,10}` ＝ 北京 09:00–12:00、14:00–18:00。
 - `holidays` 是北京日历日，**每年要人工更新**；调休上班的周末仍按周末判谷。
 - `effectiveAt` 之前的调用不套峰谷，`legacyBoundary` 之前按价表的 `legacyBase`（历史正确性）。
+
+**展示侧**（都不参与计价，只影响界面）：
+
+| 用途 | 函数 | 挂在哪 |
+|---|---|---|
+| 倒计时条（细进度 + 剩余时间） | `phaseAt()` | `/sidebar`、`/report` 的 `peak` 块 |
+| 「峰谷表」一键预览接下来的切换点 | `upcomingSwitches()`（默认 6 个） | 同上，`peak.upcoming` |
+| 跨档提醒（横幅 / 可选系统通知） | 客户端比 `peak.inPeak` + `localStorage` | 侧栏顶部，见 §四 `peakNotify` |
+
+计价本身**不依赖**这些：档位在调用发起时由 `tierFor()` 定死并写进记录（见下面「入账即固化」），
+界面怎么算倒计时都不会改动已入账的金额。
 
 ### 未定价 ≠ 0
 

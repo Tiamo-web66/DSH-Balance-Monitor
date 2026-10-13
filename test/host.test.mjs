@@ -822,6 +822,28 @@ await test('配置重载后预算额度仍是 null（loadStore 不能被 Number(
   return 'amount 仍为 null'
 })
 
+await test('POST /config：峰谷提醒是局部覆盖，两个都关就清掉这条配置', async () => {
+  const enabled = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: true } })
+  assert.deepEqual(enabled.json.data.peakNotify, { enabled: true, system: false })
+  // 只改 system 时，enabled 必须保住（客户端两个勾选框各自提交一位）
+  const system = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { system: true } })
+  assert.deepEqual(system.json.data.peakNotify, { enabled: true, system: true }, '局部覆盖不能把另一位带掉')
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).peakNotify, { enabled: true, system: true }, '要落盘')
+  // 侧栏与报表都要带上开关：侧栏据此决定跨档时弹不弹
+  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.notify, { enabled: true, system: true })
+  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.notify, { enabled: true, system: true })
+  // 非法值不写坏配置
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: 'yes' } })
+  assert.deepEqual(junk.json.data.peakNotify, { enabled: true, system: true }, '非法值保持原值')
+  // 两个都关 = 「没配」
+  await call('POST', '/plugins/dsh-balance-monitor/config', { peakNotify: { enabled: false, system: false } })
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).peakNotify, undefined, '都关 = 文件里不留一条')
+  const cleared = await call('GET', '/plugins/dsh-balance-monitor/report')
+  assert.deepEqual(cleared.json.data.notify, { enabled: false, system: false })
+  return '局部覆盖 · 都关即清空'
+})
+
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
   // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')

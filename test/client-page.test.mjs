@@ -70,6 +70,7 @@ const REPORT = {
   display: { currency: 'CNY', symbol: '¥', decimals: 4, exchangeRate: 7.2 },
   // 刻意不等于客户端兜底的 7 / 400：这样「回填的是宿主送来的值」才可断言
   retention: { ledgerDays: 12, rollupDays: 365 },
+  notify: { enabled: true, system: false },
   totals: {
     today: { usd: 0.1944, amount: 1.3997, calls: 160, priced: 159, unpriced: 1, tokens: { input: 905_000, output: 161_000, cacheRead: 64_400_000, cacheWrite: 0, reasoning: 0, total: 65_466_000 }, hitRate: 0.986 },
     month: { usd: 55.3059, amount: 398.2025, calls: 14_285, unpriced: 623, days: 12, since: '2026-10-01', tokens: { input: 27_600_000, output: 10_100_000, cacheRead: 3_431_000_000, cacheWrite: 0, reasoning: 0, total: 3_468_700_000 }, hitRate: 0.992 },
@@ -446,6 +447,19 @@ test('「显示」页也带账本保留：明细 / 日汇总 + 独立保存按�
   // 所以「回填宿主的值」由下面的点击用例断言提交出去的 payload（12 / 365 ≠ 兜底的 7 / 400）。
   return '四个控件都在'
 })
+test('「显示」页带峰谷提醒两个勾选框，且回填宿主的开关', () => {
+  const page = mount(CostPage)
+  const html = render(page)
+  for (const needle of ['峰谷提醒', '应用内提醒', '系统通知']) {
+    assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
+  }
+  const boxes = []
+  walk(page, node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
+  assert.equal(boxes.length, 2, `应有两个勾选框，实际 ${boxes.length}`)
+  assert.equal(boxes[0].checked, true, '应用内提醒应回填宿主送来的 true')
+  assert.equal(boxes[1].checked, false, '系统通知应回填 false')
+  return '两个勾选框 · 应用内=真 / 系统=假'
+})
 
 console.log('\n[交互：按钮真的打到宿主路由]')
 await (async () => {
@@ -481,6 +495,61 @@ await (async () => {
     assert.equal(body.display, undefined, '保留期不该顺手把展示设置也提交一遍')
     return 'POST /config { retention }'
   })
+  // 再点一次「应用内提醒」勾选框（取消勾选）→ 白名单局部覆盖
+  const boxes = []
+  walk(mount(CostPage), node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
+  const toggled = boxes.length === 2 && boxes[0].checked === true
+  if (toggled) boxes[0].onChange({ target: { checked: false } })
+  await tick()
+  await tick()
+  test('点「应用内提醒」→ POST /config 只带 peakNotify.enabled（局部补丁，不带别的位）', () => {
+    assert.ok(toggled, `应能拿到两个勾选框并找到已勾上的「应用内提醒」，实际 ${boxes.length} 个`)
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    assert.ok(hit !== undefined, '没有发出 /config 请求')
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.peakNotify, { enabled: false }, `实际提交：${hit.body}`)
+    assert.equal(body.retention, undefined, '不该顺手把保留期也提交一遍')
+    return 'POST /config { peakNotify: { enabled: false } }'
+  })
+})()
+
+console.log('\n[左侧栏：峰谷提醒（跨过切换点才弹一次）]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  // 提醒判定发生在「取数之后」，所以必须在**第一次挂载之前**把数据和记录摆好
+  const saved = { peak: SIDEBAR.peak, notify: SIDEBAR.notify }
+  const originalGetItem = globalThis.localStorage.getItem
+  globalThis.localStorage.getItem = key => (key === 'balance-monitor:peak-state' ? 'off' : originalGetItem(key))
+  SIDEBAR.peak = { ...SIDEBAR.peak, inPeak: true, prevAtMs: Date.now() - 5_000 }
+  SIDEBAR.notify = { enabled: true, system: false }
+  try {
+    mount(sidebar.component)
+    await tick()
+    await tick()
+    const opened = render(mount(sidebar.component))
+    test('上次记的是平价、这次是高峰 → 顶部弹一条「已进入高峰时段」', () => {
+      assert.ok(opened.includes('已进入高峰时段'), `应有提醒：${opened.slice(0, 200)}`)
+      assert.ok(opened.includes('×'), '提醒上应有「×」关闭按钮')
+      return '已进入高峰时段'
+    })
+    const recorded = localStorageWrites.filter(item => item.key === 'balance-monitor:peak-state')
+    test('提醒的同时把新档位记下来（下次同一档位不再提醒）', () => {
+      assert.equal(recorded.length > 0, true, `应写入 peak-state，实际：${JSON.stringify(localStorageWrites)}`)
+      assert.equal(recorded[recorded.length - 1].value, 'peak')
+      return 'peak-state = peak'
+    })
+    const closed = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '×')
+    const afterClose = render(mount(sidebar.component))
+    test('点「×」关掉提醒后不再显示', () => {
+      assert.ok(closed, '没点到关闭按钮')
+      assert.equal(afterClose.includes('已进入高峰时段'), false, `关掉后不该还有提醒：${afterClose.slice(0, 200)}`)
+      return '已关闭'
+    })
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem
+    SIDEBAR.peak = saved.peak
+    SIDEBAR.notify = saved.notify
+  }
 })()
 
 console.log('\n[左侧栏：余额可点击切换 DeepSeek 两条路线]')
