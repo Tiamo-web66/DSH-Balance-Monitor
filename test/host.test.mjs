@@ -1583,6 +1583,17 @@ await test('POST /history/clear 带确认 → 内存与两个文件一起清空�
   assert.equal(fresh.totals.all.calls, 1)
   return `清掉 ${cleared.json.data.ledgerDays} 天 / ${cleared.json.data.records} 条 · 之后从零开始`
 })
+// 去重是为了防「包装路由把同一次调用投递两遍」：同会话 + 同模型 + 同 token 数在 10 秒内算重复。
+// 清空历史后若不重置这份记忆，清空前刚记过的调用会在紧接着重复到达时被静默丢掉 ——
+// 刚清完就开始丢账，最容易被误会成「清坏了解」。
+await test('清空历史会重置去重记忆（刚清完不会因为 10 秒窗口把新账丢掉）', async () => {
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 's-dedupe', inputTokens: 1_000_000 })
+  await call('POST', '/plugins/dsh-balance-monitor/history/clear', { confirm: 'clear-all-history' })
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 's-dedupe', inputTokens: 1_000_000 })
+  const after = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.totals.today.calls
+  assert.equal(after, 1, `清空后这一次必须记上（不该被清空前的去重记忆吃掉），实际 ${after}`)
+  return '重置去重记忆 · 清空后照样记'
+})
 await test('POST /history/import：只做能力探测（available=false + 原因），不做回放', async () => {
   const probe = (await call('POST', '/plugins/dsh-balance-monitor/history/import', {})).json.data
   assert.equal(probe.available, false, '本版本不导入：格式未验证，宁可不做')

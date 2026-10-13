@@ -210,7 +210,7 @@ const SIDEBAR = {
   now: Report_now(),
   display: { currency: 'CNY', symbol: '¥', decimals: 4, exchangeRate: 7.2 },
   total: { calls: 160, priced: 159, unpriced: 1, usd: 0.1944, amount: 1.3997, tokens: 65_466_000, hitRate: 0.986 },
-  providers: [{ provider: 'deepseek-official', displayName: 'DeepSeek', calls: 0, unpriced: 0, usd: 0, amount: 0, tokens: 0, hitRate: null, models: [] }, { provider: 'walk-grok', displayName: 'Grok 中转', calls: 160, unpriced: 1, usd: 0.1944, amount: 1.3997, tokens: 65_466_000, hitRate: 0.986, models: [] }],
+  providers: [{ provider: 'deepseek-official', displayName: 'DeepSeek', calls: 0, unpriced: 0, usd: 0, amount: 0, tokens: 0, hitRate: null, models: [] }, { provider: 'walk-grok', displayName: 'Grok 中转', calls: 160, unpriced: 1, usd: 0.1944, amount: 1.3997, tokens: 65_466_000, hitRate: 0.986, models: [{ model: 'cn:deepseek-v4.1-flash', usd: 0.1944 }, { model: 'cn:deepseek-v4.1-pro', usd: 0.02 }] }],
   balance: SIDEBAR_BALANCE_FIRST,
   balances: [
     SIDEBAR_BALANCE_FIRST,
@@ -290,6 +290,24 @@ const STATE = {
 const calls = []
 /** localStorage 写入记录（验证「选择被记住」） */
 const localStorageWrites = []
+/**
+ * 定时器记录：用来验证「不该起定时器的地方没起」——
+ * 宿主会把这些槽位全挂上，隐藏那一处如果也轮询，就是白打一倍请求。
+ * 只记录，不改变行为（返回的还是真 id，`clearInterval` 照常生效）。
+ */
+const intervals = []
+const realSetInterval = globalThis.setInterval
+const realClearInterval = globalThis.clearInterval
+globalThis.setInterval = (fn, ms) => {
+  const id = realSetInterval(fn, ms)
+  intervals.push({ ms, id, cleared: false })
+  return id
+}
+globalThis.clearInterval = id => {
+  const hit = intervals.find(item => item.id === id)
+  if (hit !== undefined) hit.cleared = true
+  return realClearInterval(id)
+}
 Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true })
 Object.defineProperty(globalThis, 'localStorage', {
   value: {
@@ -1291,6 +1309,19 @@ await (async () => {
       assert.ok(!composerIdle.includes('本会话'), '输入区那处应收起')
       return 'header 生效'
     })
+    // 宿主会把两个槽位都挂上：没被选中的那一处不该跟着取数，也不该起自己的轮询定时器
+    //（15s 一次、每次 force 真发请求）；只数请求抓不到它 —— store 有 TTL 缓存会吃掉重复请求，
+    // 所以这里数**定时器**。
+    const timersBefore = intervals.filter(item => item.ms === 15_000 && item.cleared === false).length
+    const idleBefore = calls.filter(call => call.path.includes('/session?')).length
+    await renderSession(composerSession, { sessionId: 'sess-parent' })
+    const idleAfter = calls.filter(call => call.path.includes('/session?')).length
+    const timersAfter = intervals.filter(item => item.ms === 15_000 && item.cleared === false).length
+    test('没被选中的那处不发请求、也不起 15 秒轮询定时器', () => {
+      assert.equal(idleAfter, idleBefore, `隐藏那处不该取数：${idleBefore} → ${idleAfter}`)
+      assert.equal(timersAfter, timersBefore, `隐藏那处不该起定时器：${timersBefore} → ${timersAfter}`)
+      return `隐藏处 0 请求 · 0 新定时器（累计起过 ${intervals.filter(item => item.ms === 15_000).length} 个 15s 定时器）`
+    })
     SIDEBAR.quotaStrip = { enabled: true, showBalance: true }
     SIDEBAR.corner = { enabled: true, showTop1: true }
     await reloadSidebar()
@@ -1303,12 +1334,24 @@ await (async () => {
       assert.ok(clickIn(strip, node => node.type === 'button' && render(node.props?.children).includes('今日')), 'chip 应是可点按钮')
       return '3 个 chip · 可点'
     })
-    test('右下角角标：今日 + 峰谷档位 + Top-1 模型', () => {
+    test('右下角角标：今日 + 峰谷档位 + Top-1 模型（按金额取最大那个）', () => {
       for (const needle of ['今日 1.3997', '峰时', 'Top-1 cn:deepseek-v4.1-flash']) {
         assert.ok(cornerHtml.includes(needle), `角标缺少「${needle}」：${cornerHtml.slice(0, 200)}`)
       }
+      assert.ok(!cornerHtml.includes('cn:deepseek-v4.1-pro'), `Top-1 应是金额最大的那个：${cornerHtml.slice(0, 200)}`)
       return '角标三段'
     })
+    // 原来 Top-1 是从「模型花费卡片」的数据里取的 —— 那块卡片关着时开关就形同虚设（点了没反应）。
+    // 现在改成用侧栏自带的今日按模型明细算，这条用例把这个解耦锁住。
+    SIDEBAR.modelCard = null
+    await reloadSidebar()
+    const cornerNoCard = render(mount(corner, {}))
+    test('模型花费卡片关着时，角标的 Top-1 照样显示（不耦合那块配置）', () => {
+      assert.ok(cornerNoCard.includes('Top-1 cn:deepseek-v4.1-flash'), `不该依赖模型卡片开关：${cornerNoCard.slice(0, 200)}`)
+      return '独立于卡片开关'
+    })
+    SIDEBAR.modelCard = saved.modelCard
+    await reloadSidebar()
     SIDEBAR.quotaStrip = { enabled: false, showBalance: true }
     SIDEBAR.corner = { enabled: false, showTop1: true }
     SIDEBAR.sessionCost = { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false }
