@@ -177,6 +177,37 @@ test('口径分歧会置 mismatch', () => {
   assert.equal(result.impliedRate.toFixed(4), '1.2799')
   assert.equal(result.mismatch, true, '1 vs 1.28 应告警')
 })
+test('一致时不带原因（mismatchReason = null）', () => assert.equal(spend.mismatchReason, null))
+test('分歧带结构化原因：方向 / 倍数 / 倍率为 1 这个特征', () => {
+  const withTotal = parseUsage({
+    mode: 'quota_limited', unit: 'USD',
+    quota: { limit: 1, used: 1, remaining: 0 },
+    usage: { total: { cost: 0.005074, actual_cost: 0.006494 } },
+    model_stats: [
+      { model: 'grok-4.6', cost: 0.004, actual_cost: 0.0051 },
+      { model: 'grok-4.7', cost: 0.001074, actual_cost: 0.0014 },
+    ],
+  })
+  const one = parseBilling({ object: 'sub2api.key_billing', effective_rate_multiplier: 1, group_rate_multiplier: 1, resolved_rate_multiplier: 1, peak_rate_enabled: false })
+  const reason = computeSpend(withTotal, one).mismatchReason
+  assert.equal(reason.direction, 'station-charged-more', '实扣比按倍率算的高')
+  assert.equal(reason.rateIsUnity, true, '倍率接口报的就是 1 → 多半不是 cost×倍率 这条公式')
+  assert.equal(Number(reason.factor.toFixed(4)), 1.2799)
+  assert.equal(Number(reason.percent.toFixed(1)), 21.9, '实扣比按倍率算的高 21.9%')
+  assert.equal(reason.modelRateCount, 2)
+  return `×${reason.factor.toFixed(4)} · 逐模型 ${reason.modelRateMin.toFixed(4)}–${reason.modelRateMax.toFixed(4)}`
+})
+test('实扣更低时方向相反（促销/折扣）', () => {
+  const cheap = parseUsage({
+    mode: 'unrestricted', unit: 'USD',
+    usage: { total: { cost: 10, actual_cost: 4 } },
+  })
+  const billing = parseBilling({ object: 'sub2api.key_billing', effective_rate_multiplier: 0.5, resolved_rate_multiplier: 0.5, peak_rate_enabled: false })
+  const reason = computeSpend(cheap, billing).mismatchReason
+  assert.equal(reason.direction, 'station-charged-less')
+  assert.equal(reason.rateIsUnity, false)
+  assert.equal(reason.modelRateCount, 0, '没有逐模型明细时给 0，界面据此不显示「逐模型不一致」')
+})
 test('缺 total 时回落到 today 并标注 period', () => {
   const onlyToday = parseUsage({
     mode: 'quota_limited', unit: 'USD',
