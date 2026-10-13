@@ -246,11 +246,11 @@ const SIDEBAR = {
     period: 'today', rows: 3, position: 'bottom',
     models: 4,
     items: [
-      { key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 160, unpriced: 0, usd: 0.1944, amount: '¥1.3997', tokens: 7_654_321, hitRate: 0.986, share: 0.9 },
-      { key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 20, unpriced: 2, usd: 0.02, amount: '¥0.144', tokens: 1_000_000, hitRate: 0.5, share: 0.1 },
-      { key: 'nanshan:grok-4', provider: 'nanshan', model: 'grok-4', calls: 5, unpriced: 0, usd: 0, amount: '¥0', tokens: 1000, hitRate: null, share: null },
+      { key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 160, unpriced: 0, usd: 0.1944, amount: 1.3997, tokens: 7_654_321, hitRate: 0.986, share: 0.9 },
+      { key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 20, unpriced: 2, usd: 0.02, amount: 0.144, tokens: 1_000_000, hitRate: 0.5, share: 0.1 },
+      { key: 'nanshan:grok-4', provider: 'nanshan', model: 'grok-4', calls: 5, unpriced: 0, usd: 0, amount: 0, tokens: 1000, hitRate: null, share: null },
     ],
-    total: { usd: 0.2144, amount: '¥1.5437', calls: 185, unpriced: 2 },
+    total: { usd: 0.2144, amount: 1.5437, calls: 185, unpriced: 2 },
   },
   // 输入区三块（T3）：宿主总是送补齐默认值的形状
   sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
@@ -353,14 +353,28 @@ globalThis.window = {
   removeEventListener(event, handler) { windowListeners.get(event)?.delete(handler) },
   dispatchEvent() {},
 }
+/**
+ * `/session` 的响应闸门：命中 `match` 的请求先挂在这个 promise 上再回。
+ * 默认 `null` = 不干预（不影响别的用例）；T3 的「换会话」用例用它造出
+ * 「A 的响应还在飞、用户已经切到 B」这个时序。
+ */
+let sessionGate = null
+/** `sessionId` → 专用夹具（没登记的走通用 `sessionFixture`）。 */
+const sessionOverrides = new Map()
+/** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
+function sessionFixtureOf(path) {
+  const id = /sessionId=([^&]*)/.exec(path)?.[1] ?? ''
+  return sessionOverrides.get(id) ?? sessionFixture(path.includes('includeSubagent=1'))
+}
 globalThis.fetch = async (url, init) => {
   const path = String(url)
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
+  if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys') ? { ok: true, data: KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
-    : path.includes('/session?') ? { ok: true, data: sessionFixture(path.includes('includeSubagent=1')) }
+    : path.includes('/session?') ? { ok: true, data: sessionFixtureOf(path) }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
       : path.endsWith('/prices/update') ? { ok: true, data: { meta: { ...REPORT.prices.meta, accepted: 320 } } }
@@ -392,30 +406,32 @@ entry.factory(requireStub).apply(ctx)
 
 /**
  * `/session` 的响应夹具：`includeSubagent` 打开时多出「子代理」那一档、合计跟着变大。
- * 形状与宿主 `summarizeSession()` 一致（金额是展示币种的字符串，token 是 5 桶 + total）。
+ * 形状与宿主 `summarizeSession()` 一致：**金额是展示币种的数字**（`toDisplay()` 的返回值，
+ * 币种符号由客户端 `formatAmount()` 补），`cost` 为 `null` = 这一档全未定价；
+ * token 是 5 桶 + total。
  */
 function sessionFixture(includeSubagent) {
   const self = {
-    calls: 3, priced: 3, unpriced: 0, usd: 0.3, amount: '¥2.16', cost: '¥2.16',
+    calls: 3, priced: 3, unpriced: 0, usd: 0.3, amount: 2.16, cost: 2.16,
     tokens: { input: 1_000_000, output: 0, cacheRead: 4_000_000, cacheWrite: 0, reasoning: 0, total: 5_000_000 },
     hitRate: 0.8,
-    models: [{ key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 3, usd: 0.3, amount: '¥2.16' }],
+    models: [{ key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 3, usd: 0.3, amount: 2.16 }],
   }
   const zero = {
-    calls: 0, priced: 0, unpriced: 0, usd: 0, amount: '¥0', cost: null,
+    calls: 0, priced: 0, unpriced: 0, usd: 0, amount: 0, cost: null,
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
     hitRate: null, models: [],
   }
   const children = includeSubagent
     ? {
         ...self,
-        calls: 2, usd: 0.2, amount: '¥1.44', cost: '¥1.44',
+        calls: 2, usd: 0.2, amount: 1.44, cost: 1.44,
         tokens: { ...self.tokens, input: 500_000, total: 2_500_000 },
-        models: [{ key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 2, usd: 0.2, amount: '¥1.44' }],
+        models: [{ key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 2, usd: 0.2, amount: 1.44 }],
       }
     : zero
   const total = includeSubagent
-    ? { ...self, calls: 5, usd: 0.5, amount: '¥3.6', cost: '¥3.6', tokens: { ...self.tokens, input: 1_500_000, total: 7_500_000 } }
+    ? { ...self, calls: 5, usd: 0.5, amount: 3.6, cost: 3.6, tokens: { ...self.tokens, input: 1_500_000, total: 7_500_000 } }
     : self
   return {
     sessionId: 'sess-parent', date: '2026-10-13', includeSubagent: includeSubagent === true,
@@ -1199,7 +1215,10 @@ await (async () => {
       assert.ok(html.includes('今日 ¥1.5437'), `标题应给周期总额：${html.slice(0, 220)}`)
       assert.ok(html.includes('4 个模型'), '标题应给模型总数（不是给出去的行数）')
       assert.ok(html.includes('cn:deepseek-v4.1-flash'), '应列出模型行')
-      assert.ok(html.includes('1.3997'), '行里应有金额')
+      // 行里的金额要带币种符号（宿主给数字 1.3997，符号得客户端补）。
+      // 必须连上模型名断言：单独找 `¥1.3997` 会被侧栏「今日」行满足，测不到卡片行。
+      assert.ok(html.includes('cn:deepseek-v4.1-flash¥1.3997'), '行里应有带币种符号的金额')
+      assert.ok(!html.includes('cn:deepseek-v4.1-flash1.3997'), '金额不能裸着显示')
       assert.ok(html.includes('7.7M'), '默认显示 token')
       assert.ok(html.includes('⚠'), '未定价的行应有告警')
       return '标题 + 3 行 + ⚠'
@@ -1219,7 +1238,7 @@ await (async () => {
       const collapsed = render(mount(sidebar.component))
       assert.ok(!collapsed.includes('cn:deepseek-v4.1-pro'), `收起后不该列出行：${collapsed.slice(0, 200)}`)
       assert.ok(collapsed.includes('Top-1'), '收起时应在标题行给 Top-1')
-      assert.ok(collapsed.includes('1.3997'), 'Top-1 要带金额')
+      assert.ok(collapsed.includes('cn:deepseek-v4.1-flash ¥1.3997'), 'Top-1 要带金额（含币种符号）')
       const remembered = localStorageWrites.filter(item => item.key === 'balance-monitor:model-card-open')
       assert.equal(remembered.at(-1)?.value, '0', '收起状态要记住')
       return '收起 → Top-1 + 记住 0'
@@ -1284,6 +1303,11 @@ await (async () => {
     await tick()
     return render(mount(Component, props))
   }
+  /** 同上，但把异常收成字符串返回 —— 「不抛错」这种断言才写得出来（否则会炸掉整个文件）。 */
+  const renderSafely = async (Component, props) => {
+    try { return await renderSession(Component, props) }
+    catch (error) { return `__THROW__${String(error?.message ?? error)}` }
+  }
   // conversation.input.dock 注册了两个：index 0 = 本会话费用（order 4）、index 1 = 额度横条（order 5）
   const composerSession = component('conversation.input.dock', 0).component
   const headerSession = component('conversation.session.header.actions', 0).component
@@ -1295,11 +1319,11 @@ await (async () => {
     const composerHtml = await renderSession(composerSession, { sessionId: 'sess-parent' })
     const headerIdle = await renderSession(headerSession, { sessionId: 'sess-parent' })
     test('本会话费用：金额 / 调用数 / token / 命中率；位置=composer 时标题栏那处不渲染', () => {
-      for (const needle of ['本会话 ¥2.16', '3 次', '5.0M tok', '命中 80.0%']) {
+      for (const needle of ['本会话 ¥2.1600', '3 次', '5.0M tok', '命中 80.0%']) {
         assert.ok(composerHtml.includes(needle), `缺少「${needle}」：${composerHtml.slice(0, 200)}`)
       }
       assert.ok(!headerIdle.includes('本会话'), '位置=composer 时标题栏那处不该渲染')
-      return '¥2.16 · 3 次 · 5.0M · 80.0%'
+      return '¥2.1600 · 3 次 · 5.0M · 80.0%'
     })
     const noSession = await renderSession(composerSession, {})
     test('宿主没给 sessionId（不是会话页）→ 不渲染', () => {
@@ -1310,10 +1334,10 @@ await (async () => {
     await reloadSidebar()
     const agentHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
     test('勾「包含子代理」→ 走 total 那一档，且关掉命中率后不再显示', () => {
-      assert.ok(agentHtml.includes('本会话 ¥3.6'), `含子代理应给合计：${agentHtml.slice(0, 220)}`)
+      assert.ok(agentHtml.includes('本会话 ¥3.6000'), `含子代理应给合计：${agentHtml.slice(0, 220)}`)
       assert.ok(agentHtml.includes('5 次'), '合计调用数 5')
       assert.ok(!agentHtml.includes('命中'), '关掉命中率后不该有它')
-      return '含子代理 → ¥3.6 · 5 次'
+      return '含子代理 → ¥3.6000 · 5 次'
     })
     SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: true, includeSubagent: false }
     await reloadSidebar()
@@ -1343,18 +1367,21 @@ await (async () => {
     const stripHtml = render(mount(strip, {}))
     const cornerHtml = render(mount(corner, {}))
     test('额度横条：今日 / 峰谷档位 / 余额三个 chip，且是按钮（点一下刷新）', () => {
-      for (const needle of ['预算 39.8%', '今日 1.3997', '峰时', '余额 ¥1.51']) {
+      for (const needle of ['预算 39.8%', '今日 ¥1.3997', '峰时', '余额 ¥1.51']) {
         assert.ok(stripHtml.includes(needle), `横条缺少「${needle}」：${stripHtml.slice(0, 200)}`)
       }
+      // 今日那格的金额要带币种符号（宿主给的是数字 1.3997，符号得客户端补）
+      assert.ok(!stripHtml.includes('今日 1.3997'), `金额不能裸着显示：${stripHtml.slice(0, 200)}`)
       assert.ok(clickIn(strip, node => node.type === 'button' && render(node.props?.children).includes('今日')), 'chip 应是可点按钮')
-      return '3 个 chip · 可点'
+      return '3 个 chip · 可点 · 带币种符号'
     })
     test('右下角角标：今日 + 峰谷档位 + Top-1 模型（按金额取最大那个）', () => {
-      for (const needle of ['今日 1.3997', '峰时', 'Top-1 cn:deepseek-v4.1-flash']) {
+      for (const needle of ['今日 ¥1.3997', '峰时', 'Top-1 cn:deepseek-v4.1-flash']) {
         assert.ok(cornerHtml.includes(needle), `角标缺少「${needle}」：${cornerHtml.slice(0, 200)}`)
       }
+      assert.ok(!cornerHtml.includes('今日 1.3997'), `金额不能裸着显示：${cornerHtml.slice(0, 200)}`)
       assert.ok(!cornerHtml.includes('cn:deepseek-v4.1-pro'), `Top-1 应是金额最大的那个：${cornerHtml.slice(0, 200)}`)
-      return '角标三段'
+      return '角标三段 · 带币种符号'
     })
     // 原来 Top-1 是从「模型花费卡片」的数据里取的 —— 那块卡片关着时开关就形同虚设（点了没反应）。
     // 现在改成用侧栏自带的今日按模型明细算，这条用例把这个解耦锁住。
@@ -1381,7 +1408,78 @@ await (async () => {
     void sessionOff
     void stripOff
     void cornerOff
+
+    // ────────── 换会话：A 的请求还在飞时切到 B（P0：会话串数据）──────────
+    // 造时序：`sessionGate` 把 sess-A 的响应挂住，sess-B 的立刻回。
+    // 断言要点两条：B 渲染的是**自己的**数（不是 A 的），且切到 B 后确实为 B 发过请求。
+    SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
+    let releaseA = () => {}
+    const gateA = new Promise(resolve => { releaseA = resolve })
+    /** 一档会话数据：金额取能一眼区分的数字（A=7 次 ¥9.8765 / B=2 次 ¥1.2345）。 */
+    const sessionNodeOf = (callsCount, amount, tokensTotal) => ({
+      calls: callsCount, priced: callsCount, unpriced: 0, usd: amount / 7.2, amount, cost: amount,
+      tokens: { input: tokensTotal, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: tokensTotal },
+      hitRate: 0.5, models: [],
+    })
+    const sessionCaseOf = (sessionId, self) => ({
+      sessionId, date: '2026-10-13', includeSubagent: false, subagentSupported: true,
+      self, children: self, total: self, firstAtMs: 1, lastAtMs: 2,
+    })
+    sessionOverrides.set('sess-A', sessionCaseOf('sess-A', sessionNodeOf(7, 9.8765, 9_000_000)))
+    sessionOverrides.set('sess-B', sessionCaseOf('sess-B', sessionNodeOf(2, 1.2345, 2_000_000)))
+    sessionGate = { match: /sessionId=sess-A/, promise: gateA }
+    await reloadSidebar()
+    // A 发出去了但响应还挂着 → 这一帧没有数据可画（不许拿别的档顶替）
+    const htmlA = await renderSession(composerSession, { sessionId: 'sess-A' })
+    const htmlB = await renderSession(composerSession, { sessionId: 'sess-B' })
+    const askedB = calls.filter(call => call.path.includes('sessionId=sess-B')).length
+    // 放行 A 的迟到响应：它已经不属于当前档，**不许**覆盖 B
+    releaseA()
+    await tick()
+    await tick()
+    sessionGate = null
+    const htmlBLate = render(mount(composerSession, { sessionId: 'sess-B' }))
+    test('换会话：A 在飞时切到 B，B 画的是 B 的钱（不是 A 的），且为 B 发了请求', () => {
+      assert.ok(htmlB.includes('本会话 ¥1.2345'), `B 应显示自己的金额：${htmlB.slice(0, 200)}`)
+      assert.ok(htmlB.includes('2 次'), `B 应显示自己的调用数：${htmlB.slice(0, 200)}`)
+      assert.ok(!htmlB.includes('9.8765'), `不许把 A 的金额画到 B 身上：${htmlB.slice(0, 200)}`)
+      assert.ok(askedB >= 1, `切到 B 后必须为 B 发请求，实际 ${askedB} 次`)
+      // A 响应还没回来的那一帧：没有数据就什么都不显示，不许拿别的档（或 0）顶上
+      assert.ok(!htmlA.includes('9.8765') && !htmlA.includes('1.2345'), `A 未回来时不该有金额：${htmlA.slice(0, 120)}`)
+      return `B 独立取数（sess-B 请求 ${askedB} 次）`
+    })
+    test('A 的迟到响应不落到 B 上（换 key 后响应先校验 key）', () => {
+      assert.ok(htmlBLate.includes('本会话 ¥1.2345'), `B 应保持自己的数：${htmlBLate.slice(0, 200)}`)
+      assert.ok(!htmlBLate.includes('9.8765'), `A 的迟到响应不许覆盖 B：${htmlBLate.slice(0, 200)}`)
+      return '迟到响应已丢弃'
+    })
+
+    // ────────── 未定价 ≠ 0 + 老宿主缺字段（P1）──────────
+    // 宿主对「这一档全未定价」给 `amount: 0` / `cost: null`（界面该显示 —，不是 ¥0）
+    sessionOverrides.set('sess-unpriced', sessionCaseOf('sess-unpriced', {
+      calls: 2, priced: 0, unpriced: 2, usd: 0, amount: 0, cost: null,
+      tokens: { input: 4_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 4_000 },
+      hitRate: null, models: [],
+    }))
+    // 形状漂移：老宿主没有 `total.tokens`
+    const noTokensNode = { calls: 1, priced: 1, unpriced: 0, usd: 0.2, amount: 1.5, cost: 1.5, hitRate: 0.5, models: [] }
+    sessionOverrides.set('sess-notokens', sessionCaseOf('sess-notokens', noTokensNode))
+    const unpricedHtml = await renderSession(composerSession, { sessionId: 'sess-unpriced' })
+    const noTokensHtml = await renderSafely(composerSession, { sessionId: 'sess-notokens' })
+    test('全部未定价的会话显示 —（不是 ¥0）', () => {
+      assert.ok(unpricedHtml.includes('本会话 —'), `全未定价应为 —：${unpricedHtml.slice(0, 200)}`)
+      assert.ok(!unpricedHtml.includes('¥0'), `不许画成 ¥0：${unpricedHtml.slice(0, 200)}`)
+      assert.ok(unpricedHtml.includes('2 笔未定价'), `未定价条数照旧要报：${unpricedHtml.slice(0, 200)}`)
+      return '— 而非 ¥0（与设置页会话表同判据）'
+    })
+    test('宿主没给 total.tokens（形状漂移）→ 不抛错', () => {
+      assert.ok(!noTokensHtml.startsWith('__THROW__'), `缺 tokens 不该抛：${noTokensHtml.slice(0, 200)}`)
+      assert.ok(noTokensHtml.includes('本会话 ¥1.5000'), `其余部分照常渲染：${noTokensHtml.slice(0, 200)}`)
+      return 'undefined tokens 也渲染得出来'
+    })
   } finally {
+    // 闸门一定要放掉：留着会让后面任何一次 /session 请求挂住（用例失败时也一样）
+    sessionGate = null
     SIDEBAR.sessionCost = saved.sessionCost
     SIDEBAR.quotaStrip = saved.quotaStrip
     SIDEBAR.corner = saved.corner
