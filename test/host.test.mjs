@@ -1363,6 +1363,46 @@ await test('GET /report 下发密钥扫描配置（界面要能回填与编辑�
   assert.deepEqual(restored, before, '收尾后应完全回到默认')
   return '回填 · 归一 · 越界回落'
 })
+console.log('\n[界面数据面：26 周热力图 + 全历史「按模型」]')
+await test('喂两条不同模型的调用 → heatmap / modelsHistory 都对上，days.json 也存了明细', async () => {
+  const before = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 's-heat-a', inputTokens: 2_000_000 })
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 's-heat-b', inputTokens: 1_000_000 })
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', sessionId: 's-heat-c', inputTokens: 500_000 })
+  const data = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  // 热力图：26 周、补齐空天、末项是今天
+  assert.equal(data.heatmap.length, 182, '热力图应是 26 周（182 天）')
+  assert.equal(data.heatmap.at(-1).date, data.date, '末项是今天')
+  assert.equal(data.heatmap.at(-1).calls, (before.heatmap.at(-1).calls ?? 0) + 3, '三笔调用都记在今天')
+  assert.ok(data.heatmap.at(-1).tokens > (before.heatmap.at(-1).tokens ?? 0), 'token 也要涨')
+  assert.ok(data.heatmap.slice(0, -1).every(row => Number.isInteger(row.calls)), '补的空天是 0 而不是缺项')
+  // 全历史按模型：两个模型各一行，字段够四种排行用
+  const flash = data.modelsHistory.rows.find(row => row.model === 'cn:deepseek-v4.1-flash')
+  const pro = data.modelsHistory.rows.find(row => row.model === 'cn:deepseek-v4.1-pro')
+  assert.ok(flash !== undefined && pro !== undefined, `两个模型都应在表里：${JSON.stringify(data.modelsHistory.rows.map(r => r.key))}`)
+  // 同一个沙箱里前面的用例也喂过 flash，所以断言「增量」而不是绝对值
+  const beforeFlash = before.modelsHistory.rows.find(row => row.model === 'cn:deepseek-v4.1-flash')
+  const beforePro = before.modelsHistory.rows.find(row => row.model === 'cn:deepseek-v4.1-pro')
+  assert.equal(flash.calls, (beforeFlash?.calls ?? 0) + 2, 'flash 这次加两次')
+  assert.equal(pro.calls, (beforePro?.calls ?? 0) + 1, 'pro 这次加一次')
+  assert.ok(flash.usd > (beforeFlash?.usd ?? 0), 'flash 金额涨了')
+  assert.ok(typeof flash.hitRate === 'number' || flash.hitRate === null, '命中率字段在')
+  assert.ok(flash.tokens.total === flash.tokens.input + flash.tokens.output + flash.tokens.cacheRead + flash.tokens.cacheWrite, 'token 总数 = 四桶之和')
+  assert.ok(flash.perUsd === null || flash.perUsd > 0, '每美元 token 数（有价才有值）')
+  assert.equal(typeof data.modelsHistory.since, 'string', '起始日期在')
+  // 排序：默认按金额降序（四种排行的切换在客户端做，宿主保证默认顺序稳定）
+  for (let index = 1; index < data.modelsHistory.rows.length; index += 1) {
+    assert.ok(data.modelsHistory.rows[index - 1].usd >= data.modelsHistory.rows[index].usd, '默认应按金额降序')
+  }
+  // days.json 里存了按模型明细，且明细金额之和 = 当日金额
+  const rollup = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'days.json'), 'utf8'))
+  const day = rollup.days[data.date]
+  assert.ok(Object.keys(day.models ?? {}).length >= 2, `days.json 应存按模型明细：${JSON.stringify(day.models)}`)
+  const sum = Object.values(day.models).reduce((total, row) => total + row.usd, 0)
+  close(sum, day.usd, 1e-9, '明细金额之和 = 当日金额')
+  return `182 天热力图 · ${data.modelsHistory.rows.length} 个模型 · 明细可加总`
+})
+
 console.log('\n[Host 白名单：挡 DNS rebinding]')
 await test('rebinding 头（同源 + 恶意域名）→ 403，读和写都挡住', async () => {
   // 攻击形态：恶意页所在的域名重新解析到 127.0.0.1，浏览器于是认为这是**同源**请求：

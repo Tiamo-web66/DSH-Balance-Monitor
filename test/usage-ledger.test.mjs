@@ -26,6 +26,10 @@ import {
   normalizeRetention,
   normalizeRollup,
   pruneLedger,
+  rollupDailySeries,
+  rollupDaysMissingModels,
+  summarizeDayModels,
+  summarizeRollupModels,
   pruneRollup,
   summarizeDay,
   summarizeModels,
@@ -342,9 +346,96 @@ test('增量累加与覆盖式对齐**结果一致**（记账 O(1) 不等于口�
     appendRecord(ledger, entry)
     addRecordToRollupDay(incremental, dayKey(T0), entry)
   }
-  applyRollupDay(full, dayKey(T0), summarizeDay(ledger, dayKey(T0)))
+  // 覆盖式要把「按模型」明细一起传进来（不传 = 沿用旧的，那当然对不上增量版的明细）
+  applyRollupDay(full, dayKey(T0), summarizeDay(ledger, dayKey(T0)), summarizeDayModels(ledger, dayKey(T0)))
   assert.deepEqual(incremental.days[dayKey(T0)], full.days[dayKey(T0)])
   close(incremental.days[dayKey(T0)].usd, UNIT_USD * 40, 1e-9, '累加金额')
+  // 两条路径的「按模型」明细也必须一致（两边共用 accumulateRow）
+  assert.deepEqual(Object.keys(incremental.days[dayKey(T0)].models).sort(), Object.keys(full.days[dayKey(T0)].models).sort())
+  const key = Object.keys(full.days[dayKey(T0)].models)[0]
+  assert.equal(full.days[dayKey(T0)].models[key].calls, 40, '按模型明细也要累到 40 条')
+})
+test('增量累加同时维护「按模型」明细（日汇总与明细同源同口径）', () => {
+  const rollup = createRollup()
+  // `resolveTier` 会把请求名改写成价表里命中的那个模型名，所以键要从**记录自己**算，
+  // 不能在用例里把名字写死（否则测的是价表，不是这里的累加逻辑）。
+  const first = record({ atMs: T0, provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash' })
+  const second = record({ atMs: T0 + 1, provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash' })
+  const third = record({ atMs: T0 + 2, provider: 'nanshan', model: 'grok-4' })
+  for (const entry of [first, second, third]) addRecordToRollupDay(rollup, dayKey(T0), entry)
+  const keyOf = entry => `${entry.provider}:${entry.model}`
+  const day = rollup.days[dayKey(T0)]
+  assert.equal(day.calls, 3)
+  assert.deepEqual(Object.keys(day.models).sort(), [keyOf(third), keyOf(first)].sort())
+  assert.equal(day.models[keyOf(first)].calls, 2)
+  assert.equal(day.models[keyOf(third)].calls, 1)
+  assert.equal(day.models[keyOf(first)].tokens.input, first.buckets.input * 2, '明细也要累 token 桶')
+  // 明细金额之和 = 当日金额（同一条累加口径，允许浮点误差）
+  const sum = Object.values(day.models).reduce((total, row) => total + row.usd, 0)
+  close(sum, day.usd, 1e-9, '明细金额之和应等于当日金额')
+  // 缺 provider/model 的记录归到 unknown 桶，不能丢。
+  // （注意用空串：工厂的参数是带默认值的解构，传 undefined 会掉回 'walk-grok'）
+  addRecordToRollupDay(rollup, dayKey(T0), record({ atMs: T0 + 3, provider: '', model: '' }))
+  assert.equal(rollup.days[dayKey(T0)].models['unknown:unknown'].calls, 1)
+  return '2 个模型 + unknown 兜底 · 金额可加总'
+})
+test('全历史按模型：跨天聚合 + 老数据（没有 models 的那些天）如实报缺口', () => {
+  const rollup = createRollup()
+  // 老格式的一天（有金额但没有 models）
+  applyRollupDay(rollup, '2026-10-01', { calls: 5, priced: 5, unpriced: 0, usd: 1, buckets: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 } })
+  const m1 = record({ atMs: T0, provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash' })
+  const m2 = record({ atMs: T0, provider: 'nanshan', model: 'grok-4' })
+  addRecordToRollupDay(rollup, '2026-10-02', m1)
+  addRecordToRollupDay(rollup, '2026-10-02', m1)
+  addRecordToRollupDay(rollup, '2026-10-03', m1)
+  addRecordToRollupDay(rollup, '2026-10-03', m2)
+  const key1 = `${m1.provider}:${m1.model}`
+  const key2 = `${m2.provider}:${m2.model}`
+  const models = summarizeRollupModels(rollup)
+  assert.deepEqual(Object.keys(models).sort(), [key1, key2].sort())
+  assert.equal(models[key1].calls, 3, '跨天累加')
+  assert.equal(models[key1].days, 2, '记下它出现在几天里')
+  assert.equal(models[key2].calls, 1)
+  // 覆盖率口径：有日期过滤时按天筛
+  assert.deepEqual(Object.keys(summarizeRollupModels(rollup, { from: '2026-10-03' })).sort(), [key1, key2].sort())
+  assert.deepEqual(Object.keys(summarizeRollupModels(rollup, { from: '2026-10-04' })), [])
+  // 2026-10-01 那天有记录却没有按模型明细 → 如实报 1 天缺口（不假装历史全都在）
+  assert.equal(rollupDaysMissingModels(rollup), 1)
+  return '2 个模型 · 跨 2 天 · 缺口 1 天'
+})
+test('热力图序列：补齐空天、按日期升序、长度 = 请求天数', () => {
+  const rollup = createRollup()
+  addRecordToRollupDay(rollup, '2026-10-12', record({ atMs: T0, provider: 'p', model: 'm' }))
+  const series = rollupDailySeries(rollup, { date: '2026-10-13', days: 7 })
+  assert.equal(series.length, 7, '空天也要补上（否则按周排版会错位）')
+  assert.deepEqual(series.map(row => row.date), ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13'])
+  assert.equal(series[5].calls, 1, '有数据的那天要带上')
+  assert.equal(series[0].calls, 0, '空天是 0 而不是缺项')
+  assert.equal(series[6].date, '2026-10-13', '最后一项是请求的那天')
+  // 0 / 非法值 = 用默认宽度（26 周），上限 3650（别把内存吃光）
+  assert.equal(rollupDailySeries(rollup, { date: '2026-10-13', days: 0 }).length, 182, '0 = 走默认')
+  assert.equal(rollupDailySeries(rollup, { date: '2026-10-13', days: 'x' }).length, 182, '非法值 = 走默认')
+  assert.equal(rollupDailySeries(rollup, { date: '2026-10-13', days: 99_999 }).length, 3650, '上限 3650')
+  return '7 天补齐 · 升序 · 兜底 182 · 上限 3650'
+})
+test('归一化：老 days.json 没 models 字段也能读（当成空 map，不报错）', () => {
+  const parsed = {
+    version: 1,
+    days: {
+      '2026-10-01': { calls: 2, priced: 2, unpriced: 0, usd: 0.5, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 } },
+      '2026-10-02': {
+        calls: 1, priced: 1, unpriced: 0, usd: 0.25,
+        tokens: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        models: { 'p:m': { calls: 1, priced: 1, unpriced: 0, usd: 0.25, tokens: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 } }, bad: null },
+      },
+    },
+  }
+  const rollup = normalizeRollup(parsed)
+  assert.deepEqual(rollup.days['2026-10-01'].models, {}, '老数据 → 空 map')
+  assert.equal(rollup.days['2026-10-02'].models['p:m'].calls, 1)
+  assert.equal(rollup.days['2026-10-02'].models.bad, undefined, '坏行丢掉')
+  assert.equal(rollup.days['2026-10-02'].usd, 0.25, '金额照旧')
+  return '老文件兼容 · 坏行丢弃'
 })
 test('覆盖式对齐要把 token 桶写进去（summarizeDay 的 tokens 是数字，不是桶）', () => {
   const ledger = createLedger()
