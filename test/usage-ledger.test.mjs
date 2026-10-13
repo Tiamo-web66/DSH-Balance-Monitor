@@ -749,6 +749,93 @@ test('A5 全未定价时预算占比是 null（不是 0）；有价时是正常�
   close(hit.budget.ratio, (UNIT_USD * 7.2) / 100, 1e-12, '占比 = 展示币种已用 / 额度')
   return `未定价 null · 有价 ${hit.budget.ratio.toFixed(6)}`
 })
+
+console.log('\n[报表：账本落后守卫必须同时看条数和金额]')
+const ZERO_TOKENS = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
+/** 一条金额明确是 10 USD 的账本记录：`call` 直接给结果，避开费率噪声。 */
+function tenUsdLedger() {
+  const ledger = createLedger()
+  appendRecord(ledger, makeCallRecord({
+    atMs: T0, provider: 'walk-grok', model: 'deepseek-v4.1-flash', sessionId: 'session-aaa', buckets: BUCKETS,
+    resolved: resolveTier({ provider: 'walk-grok', model: 'deepseek-v4.1-flash', atMs: T0, snapshot: SNAPSHOT, priceTable: PRICE_TABLE }),
+    call: { cost: 10, usd: 10, basis: 'manual', parts: { currency: 'USD' } },
+    basisId: 'p1-test0000',
+  }))
+  return ledger
+}
+/** 只有未定价记录的一天（账本侧 `day.usd` 是 `null`，条数照数）。 */
+function unpricedLedger(count = 1) {
+  const ledger = createLedger()
+  for (let index = 0; index < count; index += 1) appendRecord(ledger, record({ atMs: T0 + index, tierOverride: null }))
+  return ledger
+}
+function rollupOf(date, day) {
+  const rollup = createRollup()
+  // 注意形状接近**落盘后读回来**的那一份：`normalizeRollup` 会把 `tokens` 补齐成 5 桶，
+  // 所以这里给全 `tokens`（`summarizeRollup` 直接读 `day.tokens[key]`，缺了就抛）。
+  rollup.days[date] = { date, ...day }
+  return rollup
+}
+test('日汇总当天行只有金额（calls=0 / 无 calls 键）时不再把金额反减掉', () => {
+  const date = dayKey(T0)
+  // 三种「快照更完整」的形状。第一种（条数就少）老实现已经能处理；后两种只有金额维度
+  // 看得出来 —— 老实现按 `10 - 50 = -40` 把那 50 反减掉，磁盘上有钱、报表却是小值。
+  const shapes = [
+    ['calls=3（条数维度即可看出落后）', { calls: 3, priced: 3, unpriced: 0, usd: 50, tokens: { ...ZERO_TOKENS } }],
+    ['calls=0（写了金额、条数是 0）', { calls: 0, priced: 0, unpriced: 0, usd: 50, tokens: { ...ZERO_TOKENS } }],
+    ['无 calls 键（老 / 手写形状）', { usd: 50, tokens: { ...ZERO_TOKENS } }],
+  ]
+  const notes = []
+  for (const [label, row] of shapes) {
+    const rollup = rollupOf(date, row)
+    const report = buildReport({ ledger: tenUsdLedger(), rollup, date, now: T1 })
+    assert.equal(report.totals.month.usd, 50, `${label}：本月该是快照里的 50（实际 ${report.totals.month.usd}）`)
+    assert.equal(report.totals.all.usd, 50, `${label}：累计同上（实际 ${report.totals.all.usd}）`)
+    assert.equal(report.totals.today.usd, 50, `${label}：今日也以快照为准（账本落后时）`)
+    // 账本当天**全空**（一条记录都没有）+ 快照有金额：同一条守卫，不能读成 0
+    const empty = buildReport({ ledger: createLedger(), rollup, date, now: T1 })
+    assert.equal(empty.totals.month.usd, 50, `${label} + 空账本：本月不能读成 0（实际 ${empty.totals.month.usd}）`)
+    assert.equal(empty.totals.all.usd, 50, `${label} + 空账本：累计不能读成 0（实际 ${empty.totals.all.usd}）`)
+    notes.push(`${label}→50`)
+  }
+  return notes.join(' · ')
+})
+test('day.usd 为 null（全未定价）：按 0 参与比较，且不参与减法污染正常金额', () => {
+  const date = dayKey(T0)
+  // ① 快照当天全未定价（usd: null）+ 账本有价 10 → 账本没落后 → 10 要补进来，
+  //    `null` 不能参与减法（`10 - null` 蒙对、`null - 10` 才是坑）。
+  const ten = buildReport({
+    ledger: tenUsdLedger(),
+    rollup: rollupOf(date, { calls: 1, priced: 0, unpriced: 1, usd: null, tokens: { ...ZERO_TOKENS, input: 1_000_000 } }),
+    date, now: T1,
+  })
+  assert.equal(ten.totals.month.usd, 10, `快照 usd=null 不该吞掉账本的 10（实际 ${ten.totals.month.usd}）`)
+  assert.equal(ten.totals.all.usd, 10)
+  assert.equal(ten.totals.today.usd, 10, '账本没落后 → 今日取账本金额')
+
+  // ② 账本全未定价（day.usd=null，按 0 参与比较）→ 快照有 50 仍判落后，保留 50 而不是 -50
+  for (const calls of [1, 3]) {
+    const report = buildReport({
+      ledger: unpricedLedger(calls),
+      rollup: rollupOf(date, { calls: 0, priced: 0, unpriced: 0, usd: 50, tokens: { ...ZERO_TOKENS } }),
+      date, now: T1,
+    })
+    assert.equal(report.totals.month.usd, 50, `账本 ${calls} 条全未定价：快照的 50 不能反减（实际 ${report.totals.month.usd}）`)
+    assert.equal(report.totals.all.usd, 50, `账本 ${calls} 条全未定价：累计同上`)
+    assert.equal(report.totals.today.usd, 50, '落后时今日也取快照（它是更完整的一份）')
+  }
+
+  // ③ 反向控制：账本比快照**多**（快照还没记上）时不能被误判成落后 —— 差额必须照补
+  const fresh = buildReport({
+    ledger: tenUsdLedger(),
+    rollup: rollupOf(date, { calls: 0, priced: 0, unpriced: 0, usd: 0, tokens: { ...ZERO_TOKENS } }),
+    date, now: T1,
+  })
+  assert.equal(fresh.totals.month.usd, 10, `快照 0 + 账本 10：差额要补上（实际 ${fresh.totals.month.usd}）`)
+  assert.equal(fresh.totals.all.usd, 10)
+  assert.equal(fresh.totals.today.usd, 10)
+  return 'usd=null 按 0 比 · 不污染减法 · 账本领先仍补差额'
+})
 test('报表带会话 / 模型 / 额度行（额度行并上今日金额）', () => {
   const { ledger, rollup } = reportFixture()
   const report = buildReport({
