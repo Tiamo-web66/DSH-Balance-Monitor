@@ -202,6 +202,24 @@ test('没有 sessionId 的调用一律放行（宁可多记一次也不漏账）
   assert.equal(deduper.admit('s1', 'm', BUCKETS, T0 + 10), false)
   return '无会话 = 放行'
 })
+test('去重窗口钉住：同指纹 10 秒内算 1 笔、超窗才有第 2 笔（刻意接受少账）', () => {
+  // 不传参数 = 钉住**出厂行为**（默认窗口）。这条用例同时就是窗口变更的哨兵：
+  // 谁把 windowMs 改短/改长，这里的边界断言会先红，改的人必须说明依据。
+  const deduper = createUsageDeduper()
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0), true, '第一笔：记')
+  // 同一会话、同一模型、五桶逐位相同 —— 一次**真实**调用在这里也会被当成重复，
+  // 这就是 createUsageDeduper 注释里写明的 tradeoff（防包装重复投递的代价）。
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0 + 9_999), false, '窗口内：判为重复样本，少记一笔')
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0 + 10_000), false, '边界含窗口（sweep 只在 now - at > windowMs 时清）')
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0 + 10_001), true, '超窗：记第 2 笔')
+  // 计数不是靠记忆，是账本侧的效果：两笔真调用只会落成一笔
+  const ledger = createLedger()
+  for (const offset of [0, 9_999]) {
+    if (deduper.admit('s2', 'm', BUCKETS, T0 + offset)) appendRecord(ledger, record({ atMs: T0 + offset, sessionId: 's2' }))
+  }
+  assert.equal(summarizeDay(ledger, dayKey(T0)).calls, 1, '同指纹两笔 → 只落一笔')
+  return '10 秒内 1 笔 · 超窗 2 笔'
+})
 
 console.log('\n[展示币种与倒计时]')
 test('toDisplay：USD 直出，CNY 乘汇率，汇率非法按 1', () => {
@@ -270,6 +288,74 @@ test('切换供应商时能看到该家的金额/次数/命中率', () => {
   assert.equal(deepseek.calls, 0, '官方这条今天没用量也列出来')
   assert.equal(deepseek.usd, 0)
   close(data.total.usd, UNIT_USD * 2, 1e-12, '今日合计（所有供应商相加）')
+})
+
+console.log('\n[模型花费卡片 buildModelCard]')
+test('config 显式传 null 不炸（默认值只兜 undefined）', () => {
+  const ledger = createLedger()
+  appendRecord(ledger, record())
+  // `config = {}` 是解构默认值：只在「没传键」时生效，传 null 会原样进来 → 读 .rows 抛 TypeError。
+  const card = buildModelCard({ ledger, date: dayKey(T0), config: null })
+  assert.equal(card.period, 'today', 'null 走默认周期')
+  assert.equal(card.items.length, 1, '行数走默认 5')
+  assert.equal(card.total.calls, 1)
+  // 不传 / undefined 的老行为不变
+  assert.equal(buildModelCard({ ledger, date: dayKey(T0) }).items.length, 1)
+  assert.equal(buildModelCard({ ledger, date: dayKey(T0), config: undefined }).items.length, 1)
+  // 非法 rows / 未知 period 照旧兜底（归一不改变原有的容错）
+  const weird = buildModelCard({ ledger, date: dayKey(T0), config: { rows: 0, period: 'weird' } })
+  assert.equal(weird.period, 'today')
+  assert.equal(weird.items.length, 1)
+  return 'config: null → 默认今日 / 5 行'
+})
+test('全未定价：今日与近 90 天两档总额一致为 null（此前一档 null、一档 0）', () => {
+  // 造「未定价」照套内已有写法：tierOverride: null → cost/usd 都是 null（见「未定价」那两条用例）。
+  const ledger = createLedger()
+  appendRecord(ledger, record({ tierOverride: null }))
+  const rollup = createRollup()
+  // 日汇总路径照生产写法落一次（applyRollupDay 把 null 金额存成数字 0 —— 这正是口径分叉的来源）
+  applyRollupDay(rollup, dayKey(T0), summarizeDay(ledger, dayKey(T0)), summarizeDayModels(ledger, dayKey(T0)))
+  assert.equal(rollup.days[dayKey(T0)].usd, 0, '前提：日汇总里未定价日的金额是数字 0')
+  const today = buildModelCard({ ledger, date: dayKey(T0), config: { period: 'today' } })
+  const days90 = buildModelCard({ ledger, rollup, date: dayKey(T0), config: { period: 'days90' } })
+  assert.equal(today.total.usd, null, '今日：来自 summarizeDay（本来就是 null）')
+  assert.equal(days90.total.usd, null, '近 90 天：来自 summarizeRollup，必须归一成 null 而不是 0')
+  assert.equal(today.total.amount, null)
+  assert.equal(days90.total.amount, null)
+  // 归一不能把计数抹掉
+  for (const [label, card] of [['今日', today], ['近 90 天', days90]]) {
+    assert.equal(card.total.calls, 1, `${label}：调用数照旧`)
+    assert.equal(card.total.unpriced, 1, `${label}：未定价计数照旧`)
+  }
+  // 有价时仍然是数字（而且两档一致）：未定价归一不能顺手把有价也变成 null
+  const priced = createLedger()
+  appendRecord(priced, record())
+  const pricedRollup = createRollup()
+  applyRollupDay(pricedRollup, dayKey(T0), summarizeDay(priced, dayKey(T0)), summarizeDayModels(priced, dayKey(T0)))
+  const pricedToday = buildModelCard({ ledger: priced, date: dayKey(T0), config: { period: 'today' } })
+  const pricedDays90 = buildModelCard({ ledger: priced, rollup: pricedRollup, date: dayKey(T0), config: { period: 'days90' } })
+  close(pricedToday.total.usd, UNIT_USD, 1e-12, '今日有价')
+  close(pricedDays90.total.usd, UNIT_USD, 1e-12, '近 90 天有价')
+  assert.equal(pricedToday.total.amount, toDisplay(UNIT_USD, DEFAULT_DISPLAY), '展示金额也要给出来')
+  // 空账本（没有调用）走同一个归一：两档都是 null，不留一个 0
+  assert.equal(buildModelCard({ ledger: createLedger(), date: dayKey(T0), config: { period: 'today' } }).total.usd, null)
+  assert.equal(buildModelCard({ ledger: createLedger(), rollup: createRollup(), date: dayKey(T0), config: { period: 'days90' } }).total.usd, null)
+  return '两档 total.usd/amount = null · unpriced 保持 · 有价仍为数字'
+})
+test('A4 命中率只有一套公式：卡片行 = 账本（分母含 cacheWrite）', () => {
+  const ledger = createLedger()
+  appendRecord(ledger, record({ buckets: { input: 1000, cacheRead: 500, cacheWrite: 1000 } }))
+  const day = summarizeDay(ledger, dayKey(T0))
+  const card = buildModelCard({ ledger, date: dayKey(T0), config: { period: 'today' } })
+  const expected = 500 / (1000 + 500 + 1000)
+  close(day.hitRate, expected, 1e-12, '账本那侧（summarizeDay）')
+  close(card.items[0].hitRate, expected, 1e-12, '卡片行')
+  // 关键：两侧必须是**同一个数**。早先卡片那边自己算「cacheRead /(cacheRead + input)」，
+  // 分母漏掉 cacheWrite，同一页会出现 33.3% 与 20.0% 两个命中率。
+  assert.equal(card.items[0].hitRate, day.hitRate, '两侧必须逐位相等（同一个 cacheHitRate()）')
+  assert.equal(card.items[0].tokens, 2500, '卡片 token 总数 = 5 桶之和')
+  assert.equal(card.items[0].tokens, day.buckets.input + day.buckets.cacheRead + day.buckets.cacheWrite)
+  return `两侧都 = 500/2500 = ${card.items[0].hitRate}`
 })
 
 console.log('\n[日汇总：本月 / 累计]')
@@ -638,6 +724,30 @@ test('预算额度 null / 空串保持「没填」，不会被 Number(null)=0 �
   const zero = buildReport({ ledger: createLedger(), rollup: createRollup(), budget: { enabled: true, amount: 0, period: 'month' } })
   assert.equal(zero.budget.amount, 0, '显式给 0 仍然是 0（只是占比无意义）')
   assert.equal(zero.budget.ratio, null)
+})
+test('A5 全未定价时预算占比是 null（不是 0）；有价时是正常数值', () => {
+  // 「未定价」照套内写法：tierOverride: null（cost/usd 都是 null，token 照计）
+  const unpriced = createLedger()
+  appendRecord(unpriced, record({ tierOverride: null }))
+  const none = buildReport({
+    ledger: unpriced, rollup: createRollup(), date: dayKey(T0),
+    budget: { enabled: true, amount: 100, period: 'today' },
+  })
+  assert.equal(none.totals.today.unpriced, 1, '未定价计数照旧')
+  assert.equal(none.budget.usedUsd, null, '已用金额（USD）是 null')
+  assert.equal(none.budget.usedAmount, null, '已用金额（展示币种）也是 null')
+  assert.equal(none.budget.ratio, null, '占比必须是 null：「没有价」不能画成「用了 0%」')
+  assert.equal(none.budget.ratio === 0, false, '尤其不能是 0')
+
+  const priced = createLedger()
+  appendRecord(priced, record())
+  const hit = buildReport({
+    ledger: priced, rollup: createRollup(), date: dayKey(T0), display: DEFAULT_DISPLAY,
+    budget: { enabled: true, amount: 100, period: 'today' },
+  })
+  assert.equal(typeof hit.budget.ratio, 'number', '有价时占比是数值')
+  close(hit.budget.ratio, (UNIT_USD * 7.2) / 100, 1e-12, '占比 = 展示币种已用 / 额度')
+  return `未定价 null · 有价 ${hit.budget.ratio.toFixed(6)}`
 })
 test('报表带会话 / 模型 / 额度行（额度行并上今日金额）', () => {
   const { ledger, rollup } = reportFixture()
