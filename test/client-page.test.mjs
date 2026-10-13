@@ -96,7 +96,14 @@ const REPORT = {
     { provider: 'deepseek-official', displayName: 'DeepSeek', kind: 'api-key', amount: -0.01, currency: 'CNY', isAvailable: false, granted: 0, toppedUp: -0.01, source: 'api-key', updatedAt: '2026-10-13T10:25:18.000Z' },
     { provider: 'deepseek-account', displayName: 'DeepSeek Account', kind: 'account', amount: -0.04337, currency: 'CNY', isAvailable: true, granted: 0, toppedUp: -0.04337, source: 'account-platform', updatedAt: '2026-10-13T10:25:20.000Z' },
   ],
-  peak: { enabled: true, inPeak: true, zoneKind: 'peak', prevAtMs: 1, nextAtMs: Date.parse('2026-10-13T03:28:00Z'), nextIntoPeak: false, countdownMs: 5_280_000, countdown: '1 小时 28 分' },
+  peak: {
+    enabled: true, inPeak: true, zoneKind: 'peak', prevAtMs: 1, nextAtMs: Date.parse('2026-10-13T03:28:00Z'), nextIntoPeak: false,
+    countdownMs: 5_280_000, countdown: '1 小时 28 分',
+    upcoming: [
+      { atMs: Date.parse('2026-10-13T04:00:00Z'), inPeak: false, zoneKind: null },
+      { atMs: Date.parse('2026-10-13T06:00:00Z'), inPeak: true, zoneKind: null },
+    ],
+  },
   prices: {
     meta: { fetchedAt: '2026-10-13T02:27:41.767Z', sourceKind: 'github-blob', accepted: 319, sourceUrl: 'https://api.github.com/repos/BerriAI/litellm/git/blobs/abc', bundled: false },
     sources: ['official', 'station', 'manual'],
@@ -128,7 +135,14 @@ const SIDEBAR = {
     SIDEBAR_BALANCE_FIRST,
     { provider: 'deepseek-account', displayName: 'DeepSeek Account', kind: 'account', amount: -0.04337, currency: 'CNY', isAvailable: true, granted: 0, toppedUp: -0.04337, source: 'account-platform', updatedAt: '2026-10-13T10:25:20.000Z' },
   ],
-  peak: { enabled: true, inPeak: true, zoneKind: 'peak', prevAtMs: 1, nextAtMs: Date.parse('2026-10-13T03:28:00Z'), nextIntoPeak: false, countdownMs: 5_280_000, countdown: '1 小时 28 分' },
+  peak: {
+    enabled: true, inPeak: true, zoneKind: 'peak', prevAtMs: 1, nextAtMs: Date.parse('2026-10-13T03:28:00Z'), nextIntoPeak: false,
+    countdownMs: 5_280_000, countdown: '1 小时 28 分',
+    upcoming: [
+      { atMs: Date.parse('2026-10-13T04:00:00Z'), inPeak: false, zoneKind: null },
+      { atMs: Date.parse('2026-10-13T06:00:00Z'), inPeak: true, zoneKind: null },
+    ],
+  },
   prices: { fetchedAt: '2026-10-13T02:27:41.767Z', sourceKind: 'github-blob', accepted: 319, bundled: false },
   basisIds: ['p1-03cb848a'],
 }
@@ -516,6 +530,20 @@ await (async () => {
     assert.ok(saved.length > 0, `应写入 localStorage，实际：${JSON.stringify(localStorageWrites)}`)
     assert.equal(saved[saved.length - 1].value, 'deepseek-account')
     return 'DeepSeek ¥1.51 → DeepSeek Account ¥-0.04'
+  })
+  test('峰谷表：默认收起，点「预览」才列出接下来的切换点', () => {
+    const collapsed = render(mount(sidebar.component))
+    assert.ok(collapsed.includes('峰谷表'), `侧栏应有峰谷表行：${collapsed.slice(0, 200)}`)
+    assert.ok(collapsed.includes('预览'), '默认是「预览」按钮')
+    // 倒计时条上写的是「…后进入平价」，所以行标签用「→ 平价 / → 高峰」，两者不会串
+    assert.equal(collapsed.includes('→ 平价'), false, '收起时不该把切换点列出来')
+    const shown = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children).includes('预览'))
+    assert.ok(shown, '没点到「预览」按钮')
+    const openedSchedule = render(mount(sidebar.component))
+    assert.ok(openedSchedule.includes('→ 平价'), `展开后应列出「→ 平价」：${openedSchedule.slice(0, 300)}`)
+    assert.ok(openedSchedule.includes('→ 高峰'), '展开后应列出「→ 高峰」')
+    assert.ok(openedSchedule.includes('10-13'), '每行应带本地时刻（月-日 时:分）')
+    return '收起 → 展开 · 2 个切换点'
   })
 })()
 

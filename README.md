@@ -90,6 +90,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | 余额 | `余额 ¥0.01` | **只有 DeepSeek 官方**有余额接口（`GET https://api.deepseek.com/user/balance`）；其余供应商不显示这一行 |
 | 今日 | `今日 ¥0.0000` + 供应商下拉 | 所有供应商**相加**，金额是**倍率之后**的实际花费（不是官方原价） |
 | 峰谷条 | 细进度条 + `剩余 5 小时 3 分后进入平价` | 官方峰谷相位（本地窗口 + 周末全谷 + 调休表），见第八节 |
+| 峰谷表 | `峰谷表 · 预览 · 6` → 展开列出接下来的切换点（本地时刻 + `→ 高峰` / `→ 平价` + 相对倒计时） | `lib/pricing.js` 的 `upcomingSwitches()`（默认 6 个，最多 24），宿主算好随 `/sidebar` 一起下发 |
 
 `今日` 的金额来自账本：宿主包裹 `llm/stream`，每次调用用**调用时刻**的档位算出
 「官方价 × 站方倍率 × credits」并落成一条记录（`storages/dsh-balance-monitor/ledger.json`），
@@ -298,18 +299,18 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 275 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 283 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
-$NODE test/pricing.test.mjs          # 档位与计价纯函数（62 个用例）：官方峰谷、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
+$NODE test/pricing.test.mjs          # 档位与计价纯函数（68 个用例）：官方峰谷（含未来切换点）、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
 $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（40 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（31 个用例）
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（71 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（19 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（72 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（20 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -319,7 +320,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 275 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 283 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -350,7 +351,7 @@ lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名�
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices）
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
-test/*.mjs            九套用例，离线门槛 275 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 283 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -374,8 +375,8 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
    命名不合规律的扫不到，要靠 `state.json` 的 `deepseekKeys` 手填。
 5. **`official` 价目只有 20 条**（DeepSeek 主表 4 + 厂商文档 16），其余 557 条落在
    `reseller` / `aggregator` / `unknown` 三档，默认**不参与计价**（见第八节）。没命中的模型就是未定价。
-6. **峰谷没有提醒**。判定、相位、侧栏倒计时都有（`lib/pricing.js` 本地算官方窗口 + 周末全谷 + 调休表），
-   但**弹窗提醒、系统通知、一键预览都没有**——`lib/` 与 `locale/` 里搜不到任何通知调用。
+6. **峰谷没有提醒**。判定、相位、侧栏倒计时、**一键预览切换点**都有（`lib/pricing.js` 本地算官方窗口
+   + 周末全谷 + 调休表），但**弹窗提醒与系统通知没有**——`lib/` 与 `locale/` 里搜不到任何通知调用。
 7. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
 8. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
 

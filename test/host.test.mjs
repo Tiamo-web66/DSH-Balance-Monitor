@@ -575,6 +575,25 @@ await test('GET /sidebar 结构：供应商清单 + 官方峰谷相位 + 展示�
   return `相位 inPeak=${data.peak.inPeak} 倒计时=${data.peak.countdown}`
 })
 
+await test('侧栏峰谷表：携带接下来 6 个切换点（一键预览的数据源）', async () => {
+  const res = await call('GET', '/plugins/dsh-balance-monitor/sidebar')
+  const upcoming = res.json.data.peak.upcoming
+  assert.ok(Array.isArray(upcoming), `upcoming 应是数组：${JSON.stringify(upcoming)}`)
+  assert.equal(upcoming.length, 6, `应给满 6 个，实际 ${upcoming.length}`)
+  assert.equal(upcoming[0].atMs, res.json.data.peak.nextAtMs, '第一个就是相位的 nextAtMs')
+  for (const item of upcoming) {
+    assert.equal(typeof item.atMs, 'number')
+    assert.equal(typeof item.inPeak, 'boolean')
+  }
+  for (let index = 1; index < upcoming.length; index += 1) {
+    assert.ok(upcoming[index].atMs > upcoming[index - 1].atMs, '切换点必须严格往前')
+  }
+  // 报表也带同一份（设置页与侧栏口径一致）
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(report.peak.upcoming.length, 6)
+  return `${upcoming.length} 个 · 首个 ${new Date(upcoming[0].atMs).toISOString().slice(11, 16)}Z`
+})
+
 await test('喂一次调用 → 今日出现该笔，金额 = 官方价 × 站方倍率（不是官方原价）', async () => {
   // 先把这个供应商切回 sub2api，拿到 0.09 倍率（前文测试把它切成了 other）
   await call('POST', '/plugins/dsh-balance-monitor/type', { provider: 'walk-grok', type: 'sub2api' })

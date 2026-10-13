@@ -38,6 +38,7 @@ import {
   summarizeRecords,
   tierFor,
   toUsd,
+  upcomingSwitches,
   wallClockMinutes,
 } from '../lib/pricing.js'
 import { DEFAULT_PRICE_TABLE, PRICE_TABLE_META } from '../lib/price-table.js'
@@ -142,6 +143,59 @@ test('假期相位 zoneKind = holiday', () => {
 test('enabled=false / 无窗口 → 无相位', () => {
   assert.equal(phaseAt(at(TUE_PEAK), { ...DEFAULT_OFFICIAL_PEAK, enabled: false }), null)
   assert.equal(phaseAt(at(TUE_PEAK), { ...DEFAULT_OFFICIAL_PEAK, windows: [] }), null)
+})
+
+console.log('\n[官方峰谷：未来切换点（侧栏「峰谷表」一键预览）]')
+test('工作日：按窗口起止交替，峰↔谷严格交替', () => {
+  const list = upcomingSwitches(at('2026-08-25T00:00:00Z'), { limit: 4 })
+  assert.deepEqual(list.map(item => new Date(item.atMs).toISOString()), [
+    '2026-08-25T01:00:00.000Z', // 北京 09:00 进高峰
+    '2026-08-25T04:00:00.000Z', // 12:00 回平价
+    '2026-08-25T06:00:00.000Z', // 14:00 进高峰
+    '2026-08-25T10:00:00.000Z', // 18:00 回平价
+  ])
+  assert.deepEqual(list.map(item => item.inPeak), [true, false, true, false])
+  assert.deepEqual(list.map(item => item.zoneKind), [null, null, null, null])
+})
+test('只往前扫：第一个切换点就是相位的 nextAtMs', () => {
+  const from = at(TUE_OFF)
+  const phase = phaseAt(from)
+  assert.equal(upcomingSwitches(from, { limit: 1 })[0].atMs, phase.nextAtMs)
+})
+test('周末：下一切换点是周一 00:00 北京（周日 16:00 UTC），不是窗口起点', () => {
+  const list = upcomingSwitches(at(SAT_PEAK_HOURS), { limit: 2 })
+  assert.equal(new Date(list[0].atMs).toISOString(), '2026-08-30T16:00:00.000Z')
+  assert.equal(list[0].inPeak, false, '周末结束时先回到平价，不是进高峰')
+  assert.equal(list[0].zoneKind, null, '切换点本身已不在全谷区间里')
+})
+test('按 limit 给满，且严格单调往前（不是只在 48 小时视界里找）', () => {
+  const list = upcomingSwitches(at('2026-08-25T00:00:00Z'), { limit: 6 })
+  assert.equal(list.length, 6)
+  for (let index = 1; index < list.length; index += 1) {
+    assert.ok(list[index].atMs > list[index - 1].atMs, `第 ${index} 个没有往前：${JSON.stringify(list)}`)
+  }
+  assert.ok(list.at(-1).atMs - at('2026-08-25T00:00:00Z') > 24 * 3600_000, '6 个切换点要跨过一天')
+  return `6 个 · 最远 ${new Date(list.at(-1).atMs).toISOString().slice(5, 16)}Z`
+})
+test('全谷期间切换点很稀：周末 24 小时内 0 个（全谷一直到周一 00:00 北京）', () => {
+  const from = at(SAT_PEAK_HOURS)
+  const list = upcomingSwitches(from, { limit: 6 })
+  const within24h = list.filter(item => item.atMs - from <= 24 * 3600_000)
+  assert.deepEqual(within24h, [], `24 小时内不该有切换点：${JSON.stringify(within24h)}`)
+  // 周末结束（周日 16:00 UTC）+ 周一 09:00 北京进高峰：两个都落在 48 小时内
+  const within48h = list.filter(item => item.atMs - from <= 48 * 3600_000)
+  assert.equal(within48h.length, 2)
+  assert.equal(within48h[0].atMs, at('2026-08-30T16:00:00Z'))
+  assert.equal(within48h[1].inPeak, true)
+  return '24h 内 0 个 · 48h 内 2 个'
+})
+test('脏输入与禁用配置返回空数组，不抛；不明时刻按「现在」算', () => {
+  assert.deepEqual(upcomingSwitches(NaN), [])
+  assert.deepEqual(upcomingSwitches(at(TUE_PEAK), { config: { ...DEFAULT_OFFICIAL_PEAK, enabled: false } }), [])
+  assert.equal(upcomingSwitches(at(TUE_PEAK), { limit: 1 }).length, 1, '下限 1')
+  assert.equal(upcomingSwitches(at(TUE_PEAK), { limit: 0 }).length, 6, '0 / 非法值 = 用默认 6')
+  assert.equal(upcomingSwitches(at(TUE_PEAK), { limit: 999 }).length, 24, '上限 24')
+  assert.ok(upcomingSwitches(undefined).length > 0, 'undefined = 现在，不是空数组')
 })
 
 console.log('\n[价表：单位价归一 / 调价历史 / 峰谷选列 / 时代分界]')
