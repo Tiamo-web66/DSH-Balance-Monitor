@@ -474,7 +474,7 @@ npm test                # = npm run test:offline
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（83 个用例）：官方峰谷（含未来切换点）、officialPeak 归一与假期回环校验、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
-$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（45 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
+$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（47 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
