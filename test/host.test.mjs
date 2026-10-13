@@ -7,7 +7,7 @@
  *
  *   node test/host.test.mjs
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -739,6 +739,117 @@ await test('账本读不出来时：出声 + 不用空账本把 days.json 当天
   return `月 ${report.totals.month.calls} 笔未被抹平`
 })
 
+console.log('\n[账本落后守卫：账本比 days.json 少时不许把日汇总改小]')
+/** 本地日历日 `YYYY-MM-DD`（与 lib/usage-ledger 的 dayKey 同一日历，测试里自己算一份）。 */
+function localDayKey(atMs = Date.now()) {
+  const date = new Date(atMs)
+  const pad = value => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+/**
+ * 跑一段会改账本两个文件的断言，无论成败都把文件还原回去（后面的用例还要用这份历史）。
+ * 账本与日汇总都是 apply 时才读盘，所以还原后必须重新 apply，内存才是盘上那份。
+ */
+async function withLedgerFiles(fn) {
+  const dir = join(sandbox, 'storages', 'dsh-balance-monitor')
+  const ledgerFile = join(dir, 'ledger.json')
+  const rollupFile = join(dir, 'days.json')
+  const ledgerBackup = readFileSync(ledgerFile, 'utf8')
+  const rollupBackup = readFileSync(rollupFile, 'utf8')
+  try {
+    return await fn({ dir, ledgerFile, rollupFile })
+  } finally {
+    writeFileSync(ledgerFile, ledgerBackup, 'utf8')
+    writeFileSync(rollupFile, rollupBackup, 'utf8')
+    mod.apply(makeCtx({ providers, settings }))
+  }
+}
+/**
+ * 造一份「账本 vs 日汇总」的现场并重新 apply（= 重启）。
+ *
+ * `days.json` 里额外塞一天远超保留期的 `2000-01-01`：它会被裁剪，从而**逼出一次真实落盘**
+ * （`saveStore(rollupFile, rollup)` 写的就是内存里那份）—— 这样「磁盘上今天仍是 X」才真的
+ * 证明内存没被账本覆盖，而不是只证明「我没去动那个文件」。
+ */
+function writeLedgerRollupPair({ date, records = [], days = {} }) {
+  const dir = join(sandbox, 'storages', 'dsh-balance-monitor')
+  const zeros = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
+  const record = usd => ({
+    atMs: Date.now(),
+    provider: 'walk-grok',
+    model: 'cn:deepseek-v4.1-flash',
+    sessionId: 's-rollup-guard',
+    buckets: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+    cost: usd,
+    usd,
+  })
+  const ledgerDays = records.length === 0 ? {} : { [date]: { date, records: records.map(record) } }
+  const rollupDays = {
+    '2000-01-01': { date: '2000-01-01', calls: 1, priced: 1, unpriced: 0, usd: 5, tokens: zeros, models: {} },
+  }
+  for (const [key, value] of Object.entries(days)) {
+    rollupDays[key] = { date: key, calls: 0, priced: 0, unpriced: 0, usd: 0, tokens: zeros, models: {}, ...value }
+  }
+  writeFileSync(join(dir, 'ledger.json'), `${JSON.stringify({ version: 2, days: ledgerDays }, null, 2)}\n`, 'utf8')
+  writeFileSync(join(dir, 'days.json'), `${JSON.stringify({ version: 1, days: rollupDays }, null, 2)}\n`, 'utf8')
+  warns.length = 0
+  mod.apply(makeCtx({ providers, settings }))
+  return dir
+}
+await test('账本比 days.json 少（1 笔 10 vs 3 笔 50）→ 本月/累计仍是 50，磁盘也不许变', async () => {
+  const date = localDayKey()
+  await withLedgerFiles(async () => {
+    const dir = writeLedgerRollupPair({ date, records: [10], days: { [date]: { calls: 3, usd: 50 } } })
+    const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+    assert.equal(report.totals.month.usd, 50, `本月不许被更小的账本覆盖：${JSON.stringify(report.totals.month)}`)
+    assert.equal(report.totals.all.usd, 50, `累计不许被更小的账本覆盖：${JSON.stringify(report.totals.all)}`)
+    assert.equal(report.totals.today.ledgerStale, true, '要标明「明细缺失、总额来自日汇总」')
+    assert.ok(warns.some(item => item.includes('账本比日汇总少')), `必须出声（不许静默丢钱）：${JSON.stringify(warns)}`)
+    const disk = JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8'))
+    assert.equal(disk.days[date].usd, 50, '一次真实落盘后磁盘上今天仍是 50')
+    assert.equal(disk.days[date].calls, 3, '笔数同样是日汇总那份')
+    assert.equal(disk.days['2000-01-01'], undefined, '前置：过期日被裁掉并触发落盘（磁盘值确实来自内存）')
+    return `账本 1 笔/10 → 日汇总 3 笔/50 保住`
+  })
+})
+await test('days.json 有金额没笔数（calls=0 / 缺键 / 账本全空）→ 也不许被抹成更小值', async () => {
+  const date = localDayKey()
+  const shapes = [
+    ['calls 显式 0', { calls: 0, usd: 50 }, [10]],
+    ['calls 缺键', { usd: 50 }, [10]],
+    ['账本一条都没有（旧守卫只挡 calls>0）', { calls: 0, usd: 50 }, []],
+  ]
+  const notes = []
+  for (const [label, known, records] of shapes) {
+    await withLedgerFiles(async () => {
+      const dir = writeLedgerRollupPair({ date, records, days: { [date]: known } })
+      const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+      assert.ok(warns.some(item => item.includes('账本比日汇总少')), `${label}：必须出声：${JSON.stringify(warns)}`)
+      const disk = JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8'))
+      assert.equal(disk.days[date].usd, 50, `${label}：日汇总的 50 被账本抹掉了（落盘值 ${disk.days[date].usd}）`)
+      assert.equal(disk.days[date].calls, known.calls ?? 0, `${label}：笔数也不该被改`)
+      // 报表聚合口径（lib/usage-ledger 的 ledgerBehind）另有归属：这里只锁「不许覆盖日汇总」这条不变量
+      notes.push(`${label}→磁盘 50（报表 month=${report.totals.month.usd}）`)
+    })
+  }
+  return notes.join(' · ')
+})
+await test('对照：账本比 days.json 多时照常覆盖对齐（正常自愈不能被守卫挡住）', async () => {
+  const date = localDayKey()
+  await withLedgerFiles(async () => {
+    const dir = writeLedgerRollupPair({ date, records: [10, 10, 10], days: { [date]: { calls: 1, usd: 1 } } })
+    const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+    assert.equal(report.totals.month.usd, 30, `账本更多 → 以账本为准：${JSON.stringify(report.totals.month)}`)
+    assert.equal(report.totals.all.usd, 30)
+    assert.equal(report.totals.today.calls, 3)
+    assert.equal(warns.filter(item => item.includes('账本比日汇总少')).length, 0, `不该触发守卫：${JSON.stringify(warns)}`)
+    const disk = JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8'))
+    assert.equal(disk.days[date].usd, 30, '日汇总被账本对齐（覆盖式，幂等）')
+    assert.equal(disk.days[date].calls, 3)
+    return '账本 3 笔/30 覆盖了日汇总的 1 笔/1'
+  })
+})
+
 console.log('\n[价格表：GET /prices 与「更新价格表」]')
 await test('GET /prices 给出站方价目状态与允许的来源等级', async () => {
   const res = await call('GET', '/plugins/dsh-balance-monitor/prices')
@@ -1164,6 +1275,53 @@ await test('模型花费卡片：配置是局部补丁，侧栏按配置下发 T
   })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).modelCard, undefined, '全默认 = 文件里不留一条')
   return '局部补丁 · Top-N + 份额 · 关闭即 null'
+})
+
+console.log('\n[默认 true 的布尔：关掉后必须经得住重启]')
+// 写盘侧（diffFromDefaults / mergeConversationBlock）与客户端都接受 false，读盘侧也必须收 ——
+// 早先读盘只写 `value === true`，于是「取消勾选 → 重启即丢」（落回默认 true）。
+await test('关掉默认 true 的布尔 → 重启（重载 state.json）后仍是 false', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    modelCard: { showTokens: false, rememberExpanded: false, enabled: true },
+    sessionCost: { showHitRate: false },
+    quotaStrip: { showBalance: false },
+  })
+  assert.equal(saved.statusCode, 200)
+  const stored = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(stored.modelCard, { enabled: true, rememberExpanded: false, showTokens: false },
+    `与默认不同的 false 必须落盘：${JSON.stringify(stored.modelCard)}`)
+  assert.deepEqual(stored.sessionCost, { showHitRate: false }, JSON.stringify(stored.sessionCost))
+  assert.deepEqual(stored.quotaStrip, { showBalance: false }, JSON.stringify(stored.quotaStrip))
+  // 重启 = 重新 apply（从磁盘重新读配置，走的是真实加载路径）
+  mod.apply(makeCtx({ providers, settings }))
+  const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(report.modelCard.enabled, true, '开着的那位要保住')
+  assert.equal(report.modelCard.showTokens, false, '关掉 + 重启后不许被打回默认 true')
+  assert.equal(report.modelCard.rememberExpanded, false, '关掉 + 重启后不许被打回默认 true')
+  assert.equal(report.sessionCost.showHitRate, false, '关掉 + 重启后不许被打回默认 true')
+  assert.equal(report.quotaStrip.showBalance, false, '关掉 + 重启后不许被打回默认 true')
+  return 'modelCard 三位 + sessionCost / quotaStrip 各一位都活过重启'
+})
+await test('全默认的布尔提交上去 → state.json 不留多余键（读盘侧不凭空变出 false）', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    modelCard: {
+      enabled: false, defaultExpanded: false, rememberExpanded: true, showTokens: true, showShare: true,
+      period: 'today', rows: 5, position: 'bottom',
+    },
+    sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
+    quotaStrip: { enabled: false, showBalance: true },
+  })
+  assert.equal(res.statusCode, 200)
+  const stored = JSON.parse(readFileSync(file, 'utf8'))
+  for (const key of ['modelCard', 'sessionCost', 'quotaStrip']) {
+    assert.equal(stored[key], undefined, `${key} 与默认全同 → 文件里不留一条`)
+  }
+  // 清干净，别给后面的用例留状态
+  await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: null, sessionCost: null, quotaStrip: null })
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).modelCard, undefined)
+  return '全默认不留余键'
 })
 
 await test('侧栏也带预算进度（横条那格），与设置页概览同一套规则', async () => {
@@ -1603,6 +1761,35 @@ await test('POST /history/import：只做能力探测（available=false + 原因
   assert.equal(typeof probe.sessionFiles, 'number')
   assert.equal(typeof probe.projects, 'number')
   return `${probe.sessionFiles} 份日志 · zstd=${probe.zstd} · ${String(probe.reason).slice(0, 24)}…`
+})
+// 宿主按会话格式版本换名：本机 368 个会话里 275 个只有 session.v3/v4.jsonl.zstd，
+// 只数 session.jsonl.zstd 会把份数少报成真实的 1/4。
+await test('会话日志带版本后缀（v3 / v4）也要数进去', async () => {
+  const project = join(sandbox, 'sessions', 'proj-a')
+  for (const [dir, file] of [
+    ['sess-plain', 'session.jsonl.zstd'],
+    ['sess-v3', 'session.v3.jsonl.zstd'],
+    ['sess-v4', 'session.v4.jsonl.zstd'],
+  ]) {
+    mkdirSync(join(project, dir), { recursive: true })
+    writeFileSync(join(project, dir, file), 'stub', 'utf8')
+  }
+  // 噪声：同目录里别的文件不算会话日志
+  writeFileSync(join(project, 'sess-v3', 'notes.txt'), 'stub', 'utf8')
+  const probe = (await call('POST', '/plugins/dsh-balance-monitor/history/import', {})).json.data
+  assert.equal(probe.projects, 1, JSON.stringify(probe))
+  assert.equal(probe.sessionFiles, 3, `三种文件名要数满 3 份：${JSON.stringify(probe)}`)
+  return `3 种文件名 → ${probe.sessionFiles} 份 · ${String(probe.reason).slice(0, 20)}…`
+})
+await test('只剩一个 v3 日志时：报 1 份，而不是「没有可读的会话日志」', async () => {
+  const project = join(sandbox, 'sessions', 'proj-a')
+  rmSync(join(project, 'sess-plain'), { recursive: true, force: true })
+  rmSync(join(project, 'sess-v4'), { recursive: true, force: true })
+  const probe = (await call('POST', '/plugins/dsh-balance-monitor/history/import', {})).json.data
+  assert.equal(probe.sessionFiles, 1, `只有 v3 也要数上：${JSON.stringify(probe)}`)
+  assert.equal(String(probe.reason).includes('没有可读的会话日志'), false, `不该说没有日志：${probe.reason}`)
+  assert.ok(String(probe.reason).includes('1 份会话日志'), probe.reason)
+  return `仅 v3 → ${probe.sessionFiles} 份`
 })
 
 console.log('\n[Host 白名单：挡 DNS rebinding]')
