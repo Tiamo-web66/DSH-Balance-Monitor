@@ -1,6 +1,9 @@
 # dsh-balance-monitor
 
 DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加一个「供应商类型」配置项。
+宿主固定的两条**官方路线**（`deepseek-official` / `deepseek-account`）没有站方类型 ——
+它们的余额走官方接口，那一格在它们身上只会把人引到必错的探测（拿 `api.deepseek.com` 去探
+`/v1/usage` 只会 404），所以不渲染。
 
 - **其他**（默认）：什么都不做，与原行为完全一致。
 - **Sub2Api**：用该供应商自己的 API Key 查询**额度 / 倍率 / 模型**，并按 `官方价 × 生效倍率` 算出**花费**。
@@ -276,7 +279,8 @@ POST /plugins/dsh-balance-monitor/vision/apply { provider? }    ← 省略 provi
 **在 Harness 里装**：设置 → 插件 → 安装 bundle，目标目录填本仓库的绝对路径。
 
 装完需要重启 `dsh web`（替换已安装包的 JS 模块需要重启才会加载新代码）。
-装好之后打开 **设置 → 模型**，每张供应商卡片下方会出现「供应商类型」。
+装好之后打开 **设置 → 模型**，每张供应商卡片下方会出现「供应商类型」（两条 DeepSeek 官方路线除外，
+它们只有一行口径说明：官方路线没有供应商类型，余额按官方接口查）。
 
 > 不通过 `plugin_manager` 手写 profile 的 `package.json` / `cordis.patch.yml`：那两步由安装动作自己完成。
 

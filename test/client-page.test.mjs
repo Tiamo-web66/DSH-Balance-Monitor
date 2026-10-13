@@ -1780,6 +1780,26 @@ await (async () => {
     assert.equal(hit, undefined, '账号路线连 /keys 都不该请求（它没有 key 可管）')
     return '账号路线无编辑区、无 /keys 请求'
   })
+  test('官方路线不出「供应商类型」那一格', () => {
+    // 两条 DeepSeek 路线都是宿主固定的官方端点：余额走官方接口（账号 token / api.deepseek.com），
+    // 探测链（`refreshOne` 的 sub2api 分支）对它们只会 404 或「未找到 API Key」。
+    // 所以卡片上不出现类型下拉，也不出现那句「非 Sub2Api 供应商不查询额度」。
+    for (const provider of [
+      { provider: 'deepseek-official', settingsNs: 'llm-deepseek' },
+      { provider: 'deepseek-account', settingsNs: 'llm-deepseek-account' },
+    ]) {
+      const treeOfficial = mount(Component, { provider })
+      const html = render(treeOfficial)
+      // 不能用「html 里有没有『供应商类型』这四个字」判：那句替代说明里也带着这个词
+      // （「官方路线：没有供应商类型…」）。按节点判：卡片里不该有任何一个 `select`。
+      const selects = []
+      walk(treeOfficial, node => { if (node.type === 'select') selects.push(node) })
+      assert.equal(selects.length, 0, `${provider.provider} 不该有类型下拉：${selects.length} 个 select`)
+      assert.ok(!html.includes('Sub2Api'), `${provider.provider} 不该出现 Sub2Api（下拉项 + 那句说明都该收掉）：${html.slice(0, 300)}`)
+      assert.ok(html.includes('官方路线：没有供应商类型，余额按官方接口查。'), `${provider.provider} 该说明官方路线的口径：${html.slice(0, 300)}`)
+    }
+    return 'official + account 两张卡都没有类型控件，只有一行口径说明'
+  })
   test('口径分歧：卡片不只说「不一致」，还说差在哪', () => {
     // 数据来自 STATE 夹具（fake fetch 会 JSON 往返，所以只能改夹具、不能事后改 STATE）。
     const html = render(mount(Component, { provider: { provider: 'walk-grok', settingsNs: 'llm-pi-ai' } }))
