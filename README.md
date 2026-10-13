@@ -30,6 +30,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | 全部历史从哪来 | 账本明细只有几天保留期，日汇总又没按模型拆分 → 出不来 | `days.json` 每天多存一层「按模型」（`provider:model` → 调用/金额/5 桶），跨天聚合出全历史。**0.8.0 之前写入的天没有这一层**，那部分历史如实报缺口天数（只进总额，不假装有） |
 | 峰谷提醒 | 只在**跨过**切换点时弹一条，位置固定 | 增加**提前量**（1–30 分钟，同一个切换点只提醒一次）、**提醒类型**（进峰 / 进谷 / 都要）、**弹窗位置**（右下角 / 屏幕中心）、**一键预览**（真实组件渲染，文案·位置·系统通知与实际触发完全一致） |
 | 提醒弹窗 | 塞在侧栏里的一行 | 浮层（`position: fixed`），侧栏与设置页预览**共用同一个组件** —— 预览的意义就是「所见即实际」 |
+| 侧栏模型花费卡片 | 没有 | `modelCard` 配置：开关 / 默认展开 / 记住展开状态 / 显示 Token / 显示费用占比条 / 默认周期（今日·近 90 天）/ 模型行数 1–10 / 卡片位置（底部·顶部）。**收起时标题行给 Top-1**，展开给 Top-N + 占比条；行尾对未定价的调用标 ⚠ |
 
 ### 0.7.0：officialPeak 接通 + 拦截面 + 一轮 bug 收口
 
@@ -125,7 +126,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | **界面**（语言 `auto`/`zh`/`en`、侧栏刷新间隔 10–60 秒、隐藏官方余额 / 隐藏今日消耗、会话明细显示完整 ID）；币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒（应用内 / 系统通知两个勾选框 + **提前量 1–30 分钟** + **提醒类型** + **弹窗位置** + **预览进入峰/谷**，各自独立保存）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**访问控制**（Host 白名单，反代 / 自定义域名部署用）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
+| **显示** | **界面**（语言 `auto`/`zh`/`en`、侧栏刷新间隔 10–60 秒、隐藏官方余额 / 隐藏今日消耗、会话明细显示完整 ID）；币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒（应用内 / 系统通知两个勾选框 + **提前量 1–30 分钟** + **提醒类型** + **弹窗位置** + **预览进入峰/谷**，各自独立保存）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**访问控制**（Host 白名单，反代 / 自定义域名部署用）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存）；**模型花费卡片**（开关 + 默认展开 / 记住展开 / 显示 Token / 占比条 + 默认周期 + 模型行数 + 卡片位置） |
 
 **本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
 `storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
@@ -293,6 +294,9 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `retention`：两份文件的保留天数（`ledgerDays` 账本明细 / `rollupDays` 日汇总），设置页「显示」可改；
   两者都能省，允许 `1 – 3650`，且**日汇总不会短于明细**（不合法就各自回落默认）。
   调小**立刻**裁掉超期数据（`POST /config` 时同步裁剪并落盘），调大只影响之后的留存。
+- `modelCard`：侧栏模型花费卡片（`enabled` / `defaultExpanded` / `rememberExpanded` / `showTokens` / `showShare` /
+  `period`(`today`·`days90`) / `rows`(1–10) / `position`(`bottom`·`top`)），设置页「显示」可改；同一套局部补丁规矩。
+  关闭时侧栏 payload 里这块是 `null` —— 宿主也不做聚合。展开状态记在浏览器本地（`rememberExpanded` 打开时）。
 - `peakNotify`：峰谷提醒。`enabled` 侧栏横幅 / `system` 系统通知 / `leadMinutes` 提前量（1–30）/ `type` 提醒哪一侧（`both`·`peak`·`off`）/ `position` 弹窗位置（`corner`·`center`），设置页「显示」可改，同样是局部补丁。
   两位都是**局部覆盖**：只提交一位不会把另一位带掉；两个都关 = 清掉这条配置。默认都关（不弹）。
   判定跟着侧栏轮询走（间隔可配），有两条路径：**提前量**（距切换不足 `leadMinutes` 时提醒，同一个切换点只提醒一次，记在本地）；
@@ -442,18 +446,18 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 372 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 377 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（83 个用例）：官方峰谷（含未来切换点）、officialPeak 归一与假期回环校验、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
-$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（41 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
+$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（45 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（99 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（53 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（100 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（60 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -463,7 +467,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 372 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 377 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -495,7 +499,7 @@ lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
 lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
-test/*.mjs            九套用例，离线门槛 372 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 377 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 

@@ -1117,6 +1117,55 @@ await test('峰谷提醒：提前量 / 类型 / 位置是局部补丁，非法�
   return '局部补丁 · 非法保持 · 全默认不留条'
 })
 
+await test('模型花费卡片：配置是局部补丁，侧栏按配置下发 Top-N（份额 / 未定价）', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    modelCard: { enabled: true, rows: 3, period: 'days90', showTokens: false, position: 'top' },
+  })
+  assert.deepEqual(saved.json.data.modelCard, {
+    enabled: true, defaultExpanded: false, rememberExpanded: true, showTokens: false, showShare: true,
+    period: 'days90', rows: 3, position: 'top',
+  }, '宿主总是给补齐默认值的形状（界面直接编辑它）')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).modelCard,
+    { enabled: true, showTokens: false, period: 'days90', rows: 3, position: 'top' },
+    '落盘只写与默认不同的键（showShare / rememberExpanded / defaultExpanded 是默认值，不写）')
+  // 局部补丁：只改一个位，别的位保住
+  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: { showShare: false } })
+  assert.equal(patched.json.data.modelCard.rows, 3, '行数要保住')
+  assert.equal(patched.json.data.modelCard.showShare, false)
+  assert.equal(patched.json.data.modelCard.period, 'days90', '周期要保住')
+  // 非法值保持原值
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: { rows: 99, period: 'week' } })
+  assert.equal(junk.json.data.modelCard.rows, 3, '越界行数保持原值')
+  assert.equal(junk.json.data.modelCard.period, 'days90', '不认识的周期保持原值')
+  // 侧栏按配置下发（含份额），且行数受 rows 限制
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data
+  assert.equal(sidebar.modelCard.period, 'days90')
+  assert.ok(sidebar.modelCard.items.length > 0, `应有模型行：${JSON.stringify(sidebar.modelCard.items)}`)
+  assert.ok(sidebar.modelCard.items.length <= 3, `rows=3 → 最多三行，实际 ${sidebar.modelCard.items.length}`)
+  const first = sidebar.modelCard.items[0]
+  assert.equal(typeof first.key, 'string')
+  assert.ok(first.share === null || (first.share > 0 && first.share <= 1), `份额应在 (0,1]：${first.share}`)
+  assert.ok(typeof sidebar.modelCard.total.amount !== 'undefined', '周期总额要给（收起摘要用）')
+  assert.ok(typeof sidebar.modelCard.models === 'number', '模型总数要给')
+  const shareSum = sidebar.modelCard.items.reduce((total, row) => total + (row.share ?? 0), 0)
+  assert.ok(shareSum <= 1 + 1e-9, `给出的行份额之和不该超过 1（实际 ${shareSum}）`)
+  // 排序：金额降序
+  for (let index = 1; index < sidebar.modelCard.items.length; index += 1) {
+    assert.ok(sidebar.modelCard.items[index - 1].usd >= sidebar.modelCard.items[index].usd, '应按金额降序')
+  }
+  // 关掉 = 不下发（宿主也不白算聚合）
+  const off = await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: { enabled: false } })
+  assert.equal(off.json.data.modelCard.enabled, false)
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.modelCard, null, '关闭时不下发')
+  // 全部回到默认 → 文件里不留条
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    modelCard: { period: 'today', rows: 5, showTokens: true, showShare: true, position: 'bottom' },
+  })
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).modelCard, undefined, '全默认 = 文件里不留一条')
+  return '局部补丁 · Top-N + 份额 · 关闭即 null'
+})
+
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
   // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')

@@ -210,6 +210,18 @@ const SIDEBAR = {
     ],
   },
   prices: { fetchedAt: '2026-10-13T02:27:41.767Z', sourceKind: 'github-blob', accepted: 319, bundled: false },
+  // 模型花费卡片（宿主把「配置 + 数据」摊在一起下发；`items` 是数据、`rows` 是「显示几行」）
+  modelCard: {
+    enabled: true, defaultExpanded: true, rememberExpanded: true, showTokens: true, showShare: true,
+    period: 'today', rows: 3, position: 'bottom',
+    models: 4,
+    items: [
+      { key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 160, unpriced: 0, usd: 0.1944, amount: '¥1.3997', tokens: 7_654_321, hitRate: 0.986, share: 0.9 },
+      { key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 20, unpriced: 2, usd: 0.02, amount: '¥0.144', tokens: 1_000_000, hitRate: 0.5, share: 0.1 },
+      { key: 'nanshan:grok-4', provider: 'nanshan', model: 'grok-4', calls: 5, unpriced: 0, usd: 0, amount: '¥0', tokens: 1000, hitRate: null, share: null },
+    ],
+    total: { usd: 0.2144, amount: '¥1.5437', calls: 185, unpriced: 2 },
+  },
   basisIds: ['p1-03cb848a'],
 }
 function Report_now() { return Date.parse('2026-10-13T02:00:00Z') }
@@ -1077,6 +1089,93 @@ await (async () => {
     SIDEBAR.notify = saved.notify
     await reloadSidebar()
   }
+})()
+
+console.log('\n[左侧栏：模型花费卡片]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  const saved = { modelCard: SIDEBAR.modelCard }
+  // store 已加载过：focus 事件让侧栏重新取数（与峰谷提醒那节同一手法）
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
+  try {
+    await reloadSidebar()
+    test('卡片：标题给周期总额与模型数，行给模型名 + 金额 + token + 未定价告警', () => {
+      const html = render(mount(sidebar.component))
+      assert.ok(html.includes('模型花费'), '应有卡片标题')
+      assert.ok(html.includes('今日 ¥1.5437'), `标题应给周期总额：${html.slice(0, 220)}`)
+      assert.ok(html.includes('4 个模型'), '标题应给模型总数（不是给出去的行数）')
+      assert.ok(html.includes('cn:deepseek-v4.1-flash'), '应列出模型行')
+      assert.ok(html.includes('1.3997'), '行里应有金额')
+      assert.ok(html.includes('7.7M'), '默认显示 token')
+      assert.ok(html.includes('⚠'), '未定价的行应有告警')
+      return '标题 + 3 行 + ⚠'
+    })
+    test('占比条：宽度按 share 给（0.9 → 90%）', () => {
+      const widths = []
+      walk(mount(sidebar.component), node => {
+        const width = node.props?.style?.width
+        if (typeof width === 'string' && width.endsWith('%')) widths.push(width)
+      })
+      assert.ok(widths.includes('90%'), `应有一条 90% 的占比条：${widths.join(',')}`)
+      assert.ok(widths.includes('10%'), `应有一条 10% 的占比条：${widths.join(',')}`)
+      return widths.filter(item => item.endsWith('%')).join(' ')
+    })
+    test('收起 → 行收起、标题行上给 Top-1，且记住展开状态', () => {
+      assert.ok(clickMatch(sidebar.component, '模型花费'), '应能点标题收起')
+      const collapsed = render(mount(sidebar.component))
+      assert.ok(!collapsed.includes('cn:deepseek-v4.1-pro'), `收起后不该列出行：${collapsed.slice(0, 200)}`)
+      assert.ok(collapsed.includes('Top-1'), '收起时应在标题行给 Top-1')
+      assert.ok(collapsed.includes('1.3997'), 'Top-1 要带金额')
+      const remembered = localStorageWrites.filter(item => item.key === 'balance-monitor:model-card-open')
+      assert.equal(remembered.at(-1)?.value, '0', '收起状态要记住')
+      return '收起 → Top-1 + 记住 0'
+    })
+    test('位置 bottom（默认）→ 卡片排在峰谷条之后', () => {
+      const html = render(mount(sidebar.component))
+      assert.ok(html.indexOf('模型花费') > html.indexOf('进入平价'), `bottom：卡片应在峰谷条之后：${html.slice(0, 260)}`)
+      return 'bottom 生效'
+    })
+  } finally {
+    SIDEBAR.modelCard = saved.modelCard
+  }
+  await reloadSidebar()
+  // 位置：top（原来那条 finally 会把夹具复位，所以放到 finally 之后再改）
+  SIDEBAR.modelCard = { ...saved.modelCard, position: 'top' }
+  await reloadSidebar()
+  test('切到 position=top → 卡片跑到峰谷条前面', () => {
+    const html = render(mount(sidebar.component))
+    assert.ok(html.indexOf('模型花费') < html.indexOf('进入平价'), `top：卡片该在前：${html.slice(0, 260)}`)
+    return 'top 生效'
+  })
+  // 关掉开关 / 不显示 token / 不显示占比条
+  SIDEBAR.modelCard = { ...saved.modelCard, showTokens: false, showShare: false }
+  await reloadSidebar()
+  test('showTokens / showShare 关掉后对应内容不渲染', () => {
+    const html = render(mount(sidebar.component))
+    assert.ok(html.includes('cn:deepseek-v4.1-flash'), '行还在')
+    assert.ok(!html.includes('7.7M'), `token 该收起来：${html.slice(0, 220)}`)
+    const percents = []
+    walk(mount(sidebar.component), node => {
+      const width = node.props?.style?.width
+      if (typeof width === 'string' && width.endsWith('%')) percents.push(width)
+    })
+    assert.ok(!percents.includes('90%'), `占比条该收起来：${percents.join(',')}`)
+    return '两列都收起来了'
+  })
+  SIDEBAR.modelCard = null
+  await reloadSidebar()
+  test('关闭卡片（宿主下发 null）→ 侧栏不渲染这块', () => {
+    const html = render(mount(sidebar.component))
+    assert.ok(!html.includes('模型花费'), '关掉后不该有这块')
+    return '已关闭'
+  })
+  SIDEBAR.modelCard = saved.modelCard
+  try { globalThis.localStorage.removeItem('balance-monitor:model-card-open') } catch { /* 假的 localStorage 可能没实现 */ }
+  await reloadSidebar()
 })()
 
 console.log('\n[左侧栏：余额可点击切换 DeepSeek 两条路线]')
