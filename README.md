@@ -134,7 +134,11 @@ margin     = 0 auto
 - **多把 key**：宿主自己的 DeepSeek API Key 适配器只认一把（`apiKeyEnv` 是单值），想按多把 key 汇总
   就用 `deepseekKeys` 列引用（字符串或 `[{ ref, label }]`）——**侧栏余额 = 各把 key 之和**，
   币种不一致时不显示总额。没填 label 的引用会按名字派生一个短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`）。
-- **卡片上的密钥编辑区**（0.7.0）：在 DeepSeek 卡片的「添加 key」行里直接填 key → `PUT /keys`
+- **卡片上的密钥编辑区**（0.7.0）：**只渲染在 API Key 路线**（`deepseek-official`）的卡片上。
+  账号路线（`deepseek-account`）不吃 key —— 它用宿主 `deepseekAccount` 服务的登录 token，路线本身
+  没有 `apiKeyEnv`：候选名一个都推不出来、`/keys` 恒回空列表、`nextRef` 是 `null`（在那个输入框里
+  填值点「保存 key」只会拿到 400「没有可用的引用名（候选都占满了）」），所以它不渲染这一块。
+  在 API Key 卡片的「添加 key」行里直接填 key → `PUT /keys`
   写进宿主凭据库（顺位引用名，或自己填 `ref` / `label`），每行可删（**主 key 拒绝删**，
   要换请走卡片上方宿主自己的「API 密钥」）。默认**不预取明文**，点行内小眼睛才 `POST /keys/reveal`
   拉一次值；该路由只认「属于这条路线」的引用（别的引用一律 403）。
@@ -359,7 +363,8 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   与 `officialPeak` 同一套规矩：`/config` 是**局部补丁**（没给的键沿用当前值，`null` 才是清空），
   且只沉淀与默认不同的字段。
 - `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
-  卡片上的密钥编辑区会自动维护它；侧栏余额 = 各把之和（币种不一致就不给总额）。
+  卡片上的密钥编辑区会自动维护它（**只有 API Key 路线有编辑区**，账号路线不渲染）；
+  侧栏余额 = 各把之和（币种不一致就不给总额）。
 - `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
   （默认 `DEEPSEEK_API_KEY`、`DEEPSEEK_KEY` × `_2…_9`），设置页「显示 → 密钥扫描」可改。
 - `scanCredentialsFile`：读 `~/.dsh/.credentials.yaml` 里 `refs:` 段的**键名**（不读值）来补全候选名。

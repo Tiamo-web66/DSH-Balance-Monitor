@@ -286,6 +286,8 @@ const STATE = {
   types: {},
   providers: [
     { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', deepseekRoute: 'api-key', type: 'other', status: 'idle', hasKey: true, image: { editable: false } },
+    // 账号路线：和真宿主一样**没有** `apiKeyEnv` / `hasKey`（它用登录 token，不吃 key）
+    { provider: 'deepseek-account', displayName: 'DeepSeek Account', settingsNs: 'llm-deepseek-account', deepseekRoute: 'account', type: 'other', status: 'idle', image: { editable: false } },
     {
       provider: 'walk-grok', displayName: 'Grok 中转', settingsNs: 'llm-pi-ai', type: 'sub2api', status: 'ok', hasKey: true,
       image: { editable: false },
@@ -1766,6 +1768,17 @@ await (async () => {
     const htmlOther = render(mount(Component, { provider: { provider: 'walk-grok', settingsNs: 'llm-pi-ai' } }))
     assert.ok(!htmlOther.includes('添加 key'), `普通中转站卡片不该有 key 编辑区：${htmlOther.slice(0, 200)}`)
     return 'walk-grok 无编辑区'
+  })
+  test('账号路线（登录 token）不显示密钥编辑区', () => {
+    // 账号路线的 `apiKeyEnv` 是 undefined → 候选名一个都推不出来：`/keys` 恒回空列表、
+    // `nextRef` 是 null（填了值点「保存 key」只会拿到 400「没有可用的引用名」）。
+    // 之前只判 `deepseekRoute !== undefined`，于是账号卡片上挂着一个死掉的输入框。
+    const before = calls.length
+    const htmlAccount = render(mount(Component, { provider: { provider: 'deepseek-account', settingsNs: 'llm-deepseek-account' } }))
+    assert.ok(!htmlAccount.includes('添加 key'), `账号路线不该有 key 编辑区：${htmlAccount.slice(0, 200)}`)
+    const hit = calls.slice(before).find(call => call.path.includes('/keys?provider=deepseek-account'))
+    assert.equal(hit, undefined, '账号路线连 /keys 都不该请求（它没有 key 可管）')
+    return '账号路线无编辑区、无 /keys 请求'
   })
   test('口径分歧：卡片不只说「不一致」，还说差在哪', () => {
     // 数据来自 STATE 夹具（fake fetch 会 JSON 往返，所以只能改夹具、不能事后改 STATE）。
