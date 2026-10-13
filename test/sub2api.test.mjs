@@ -2,11 +2,15 @@
 /**
  * Sub2Api 适配器验证：纯函数用例 + 对真实站的联网用例。
  *
- *   node test/sub2api.test.mjs           # 跑全部（联网用例从 ~/.dsh/.credentials.yaml 取 key）
- *   node test/sub2api.test.mjs --offline # 只跑纯函数用例
+ *   node test/sub2api.test.mjs                      # 跑全部（联网用例从 ~/.dsh/.credentials.yaml 取 key）
+ *   node test/sub2api.test.mjs --offline            # 只跑纯函数用例（离线门槛，npm test 走这条）
+ *   node test/sub2api.test.mjs --allow-unreachable  # 联网用例里**纯传输层故障**降级为 SKIP（网络不稳时用）
  *
  * 联网用例只发 GET，每站 3 个请求（/v1/usage、/v1/sub2api/billing、/v1/models）。
  * 输出里只出现 key 前 6 位。
+ *
+ * 失败分两类，别混：**断言失败**（倍率被站方改了、模型清单空了）才是代码/口径问题；
+ * **传输层不可达**（DNS/TLS/超时）是环境问题，不算代码回归，`--allow-unreachable` 会把它降成 SKIP。
  */
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -20,9 +24,22 @@ import {
 
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const OFFLINE = process.argv.includes('--offline')
+const ALLOW_UNREACHABLE = process.argv.includes('--allow-unreachable')
+
+/** 传输层故障专用标记：与「断言失败」区分开，供 lenient 模式降级。 */
+class Unreachable extends Error {}
+
+/** 探测失败、且**每个**出错端点都是传输层故障（DNS/TLS/超时）→ 环境问题，不是代码回归。 */
+function isTransportOnly(probe) {
+  if (probe === null || typeof probe !== 'object' || probe.ok) return false
+  const errors = Object.values(probe.errors ?? {}).filter(Boolean)
+  return errors.length > 0 && errors.every(error => error.transport === true)
+}
 
 let passed = 0
 let failed = 0
+let skipped = 0
+let unreachableFailed = 0
 function test(name, fn) {
   try {
     const result = fn()
@@ -39,7 +56,13 @@ async function testAsync(name, fn) {
     passed++
     console.log(`  ok   ${name}${result === undefined ? '' : `  → ${result}`}`)
   } catch (error) {
+    if (error instanceof Unreachable && ALLOW_UNREACHABLE) {
+      skipped++
+      console.log(`  SKIP ${name}\n       ${error.message}`)
+      return
+    }
     failed++
+    if (error instanceof Unreachable) unreachableFailed++
     console.log(`  FAIL ${name}\n       ${error.message}`)
   }
 }
@@ -248,7 +271,11 @@ for (const target of LIVE) {
     const key = refs[target.keyEnv]
     assert.ok(key, `缺少凭据 ${target.keyEnv}`)
     const probe = await probeSub2Api(target.baseURL, key)
-    if (!probe.ok) throw new Error(`探测失败：${describeProbeError(probe)} (root=${probe.root})`)
+    if (!probe.ok) {
+      const detail = `探测失败：${describeProbeError(probe)} (root=${probe.root})`
+      if (isTransportOnly(probe)) throw new Unreachable(`[网络不可达] ${detail}`)
+      throw new Error(detail)
+    }
     assert.equal(probe.detected, true, '应识别为 Sub2Api')
     assert.equal(probe.billing.effectiveRate, target.expectedRate, `倍率应为 ${target.expectedRate}`)
     assert.ok(probe.models.length > 0, '应拿到模型清单')
@@ -259,6 +286,8 @@ for (const target of LIVE) {
 console.log('\n[联网] 非 Sub2Api 站点必须被识别出来')
 await testAsync('wbfd（不是 sub2api）', async () => {
   const probe = await probeSub2Api('http://114.66.62.99:7863/v1', refs.WBFD_API_KEY)
+  // 站点连不上时「探测失败」不是识别结论 —— 不能让它冒充「已正确识别为非 Sub2Api」。
+  if (isTransportOnly(probe)) throw new Unreachable(`[网络不可达] ${describeProbeError(probe)}`)
   assert.equal(probe.ok, false, '不应判为 Sub2Api')
   assert.equal(probe.detected, false)
   return describeProbeError(probe).slice(0, 120)
@@ -266,6 +295,7 @@ await testAsync('wbfd（不是 sub2api）', async () => {
 
 await testAsync('deepseek 官方域名（不是 sub2api）', async () => {
   const probe = await probeSub2Api('https://api.deepseek.com', refs.DEEPSEEK_API_KEY)
+  if (isTransportOnly(probe)) throw new Unreachable(`[网络不可达] ${describeProbeError(probe)}`)
   assert.equal(probe.ok, false, '不应判为 Sub2Api')
   return describeProbeError(probe).slice(0, 120)
 })
@@ -273,5 +303,11 @@ await testAsync('deepseek 官方域名（不是 sub2api）', async () => {
 console.log('\n[默认值]')
 test('默认类型是 other', () => assert.equal(DEFAULT_PROVIDER_TYPE, 'other'))
 
-console.log(`\n${passed} 通过 / ${failed} 失败`)
+const skipNote = skipped > 0 ? ` / ${skipped} 跳过（网络不可达）` : ''
+console.log(`\n${passed} 通过 / ${failed} 失败${skipNote}`)
+if (unreachableFailed > 0) {
+  const total = unreachableFailed + skipped
+  console.log(`  其中 ${total} 条是传输层不可达（DNS/TLS/超时），属环境问题、非代码回归；`)
+  console.log('  网络不稳时可加 --allow-unreachable 把它们降级为 SKIP（等价 npm run test:net:lenient）。')
+}
 process.exit(failed === 0 ? 0 : 1)

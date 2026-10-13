@@ -293,33 +293,29 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# 档位与计价纯函数（62 个用例，不出网）：官方峰谷、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
-$NODE test/pricing.test.mjs
+# ── 门槛：全部不出网（离线 265 个用例 / 9 套）────────────────────────────
+npm test                # = npm run test:offline
+# 单独跑某一套：
+$NODE test/pricing.test.mjs          # 档位与计价纯函数（62 个用例）：官方峰谷、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
+$NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
+$NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
+$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（35 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、预算占比、三级金额不重复计数
+$NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
+$NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（31 个用例）
+$NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（68 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（17 个用例）
 
-# 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
-$NODE test/litellm-prices.test.mjs
-
-# 用量账本 + 侧栏/报表聚合（35 个用例，不出网）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、预算占比、三级金额不重复计数
-$NODE test/usage-ledger.test.mjs
-
-# DeepSeek 官方余额（11 个用例，fetch 全部打桩）：域名白名单、金额解析、错误形态
-$NODE test/balance.test.mjs
-
-# 纯函数 + 真实站联网（38 个用例；联网用例从 ~/.dsh/.credentials.yaml 取 key，输出只带 key 前 6 位）
-$NODE test/sub2api.test.mjs
-
-# 模态补全纯函数（10 个用例，不出网）
-$NODE test/vision.test.mjs
-
-# host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（53 个用例，全程离线）
-$NODE test/host.test.mjs
-
-# 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（11 个用例，不出网）
-$NODE test/client-page.test.mjs
-
-# 只跑纯函数（不出网的部分）
-npm run test:offline
+# ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
+npm run test:net           # 严格：任一站不可达即退出码 1
+npm run test:net:lenient   #  纯传输层不可达（DNS/TLS/超时）降级为 SKIP，只对断言失败退出 1
+npm run test:all           # 离线 + 严格联网
 ```
+
+**联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
+传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
+所以**别把 `npm test` 换成联网版**：离线 265 个用例才是唯一稳定的回归门槛。
+
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -350,25 +346,47 @@ lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名�
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices）
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
-test/*.mjs            七套用例：pricing / litellm-prices / usage-ledger / balance（纯函数）+ sub2api（联网）+ vision + host（离线驱动路由与假流）
-research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器
+test/*.mjs            九套用例，离线门槛 265 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
+research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
 ---
 
 ## 七、已知限制
 
-1. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
-2. **只认 Sub2Api**。其他中转站（`New API`、`WorkBuddy` 等）暂不支持，选「其他」即完全不碰。
-3. **峰谷只做展示**：`peak_*` 与 `applied_peak_multiplier` 直接来自接口，插件不做本地峰谷推算，
-   也不做 DeepSeek 官方错峰的计算（那是下一条链路的事）。
-4. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
-5. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
-   （接错 API 会把整张卡片打崩，所以先用防御式探测）。
-6. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
-7. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
-   自动补全的触发点是「设置 → 模型」页面渲染出本插件的卡片（也就是 `/state` 被访问）——
-   不开这个页面时不会后台定时扫。写盘失败会进入 30s 冷却，不会每次请求都撞同一堵墙。
+按「硬限制（站方/上游决定，改不了）」与「未做（能补，还没补）」分开列，**不粉饰**。
+
+### 硬限制
+
+1. **只认 Sub2Api 计费口径**。`New API` / `one-api` 系**没有适配器**（选「其他」即完全不碰）——
+   `research/relay-endpoint-map-newapi-oneapi.md` 里已有接口清单与源码级结论，落地还差一个适配器。
+2. **积分倍率型站（wbfd 这类）折算不出钱**。这类站 `/v1/usage` 是 404、只有 `/v1/models[].credits`
+   （如 `"x0.11"`），既无余额也无「官方价」，只能给**相对量**（`creditsWeight()`）。
+   换货币要站点未公开的基准价，本模块**不猜**。
+3. **余额只有 DeepSeek 两条路线有接口**。中转站没有余额端点 → 侧栏不显示那一行，
+   官方余额也只在 `api.deepseek.com` 域名上查（白名单，防 key 被送到别处）。
+4. **多 key 只能按名字探测**。宿主凭据服务不能枚举 refs，插件按**前缀 + 序号**扫
+   （默认 `DEEPSEEK_API_KEY[_2..9]`、`DEEPSEEK_KEY[_2..9]`，共 18 个候选）。
+   命名不合规律的扫不到，要靠 `state.json` 的 `deepseekKeys` 手填。
+5. **`official` 价目只有 20 条**（DeepSeek 主表 4 + 厂商文档 16），其余 557 条落在
+   `reseller` / `aggregator` / `unknown` 三档，默认**不参与计价**（见第八节）。没命中的模型就是未定价。
+6. **峰谷没有提醒**。判定、相位、侧栏倒计时都有（`lib/pricing.js` 本地算官方窗口 + 周末全谷 + 调休表），
+   但**弹窗提醒、系统通知、一键预览都没有**——`lib/` 与 `locale/` 里搜不到任何通知调用。
+7. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
+8. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
+
+### 未做（能补，还没补）
+
+9. **历史保留期是硬编码常量**：账本明细 7 天（`lib/usage-ledger.js:15` 的 `LEDGER_KEEP_DAYS`）、
+   日汇总 400 天（同文件 `ROLLUP_KEEP_DAYS`）。两者已是纯函数参数，**接设置项即可**，只是还没接。
+10. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
+   **没有跨进程文件锁**。同一台机器跑两个宿主实例同时记账，理论上会互相覆盖。
+11. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
+    （接错 API 会把整张卡片打崩，所以先用防御式探测）。
+12. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
+    自动补全的触发点是「设置 → 模型」页面渲染出本插件的卡片（也就是 `/state` 被访问）——
+    不开这个页面时不会后台定时扫。写盘失败会进入 30s 冷却，不会每次请求都撞同一堵墙。
+13. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
 
 ---
 
