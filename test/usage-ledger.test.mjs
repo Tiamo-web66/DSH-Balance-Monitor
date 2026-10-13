@@ -30,6 +30,7 @@ import {
   rollupDaysMissingModels,
   summarizeDayModels,
   summarizeRollupModels,
+  summarizeSession,
   pruneRollup,
   summarizeDay,
   summarizeModels,
@@ -66,12 +67,14 @@ const SNAPSHOT = { billing: { groupRate: 0.09, resolvedRate: 0.09, peak: { enabl
 const BUCKETS = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
 const UNIT_USD = 0.3 * 0.09
 
-function record({ atMs = T0, provider = 'walk-grok', model = 'deepseek-v4.1-flash', buckets = BUCKETS, snapshot = SNAPSHOT, priceTable = PRICE_TABLE, tierOverride } = {}) {
+function record({ atMs = T0, provider = 'walk-grok', model = 'deepseek-v4.1-flash', sessionId = null, parentSessionId = null, buckets = BUCKETS, snapshot = SNAPSHOT, priceTable = PRICE_TABLE, tierOverride } = {}) {
   const resolved = resolveTier({ provider, model, atMs, snapshot, priceTable })
   return makeCallRecord({
     atMs,
     provider,
     model,
+    sessionId,
+    parentSessionId,
     buckets,
     resolved: tierOverride === undefined ? resolved : { ...resolved, tier: tierOverride },
     basisId: 'p1-test0000',
@@ -337,6 +340,57 @@ test('坏文件不会炸：normalizeRollup 丢垃圾、补缺省', () => {
   assert.equal(rollup.days['2026-09-10'].usd, 1.5)
   assert.deepEqual(normalizeRollup(null).days, {})
 })
+test('本会话费用：self / 子代理 / 合计，「宿主没给归属」时如实报 subagentSupported=false', () => {
+  const ledger = createLedger()
+  appendRecord(ledger, record({ atMs: T0, sessionId: 's-parent' }))
+  appendRecord(ledger, record({ atMs: T0 + 1, sessionId: 's-parent' }))
+  appendRecord(ledger, record({ atMs: T0 + 2, sessionId: 's-child', parentSessionId: 's-parent' }))
+  appendRecord(ledger, record({ atMs: T0 + 3, sessionId: 's-other' }))
+  const off = summarizeSession(ledger, { sessionId: 's-parent', date: dayKey(T0) })
+  assert.equal(off.self.calls, 2)
+  assert.equal(off.children.calls, 0, '关着时不算子代理')
+  assert.equal(off.total.calls, 2, '合计 = 自身')
+  assert.equal(off.subagentSupported, true, '账本里有归属信息')
+  const on = summarizeSession(ledger, { sessionId: 's-parent', date: dayKey(T0), includeSubagent: true })
+  assert.equal(on.self.calls, 2)
+  assert.equal(on.children.calls, 1, '子代理那一档单独给出来（界面要能拆开看）')
+  assert.equal(on.total.calls, 3)
+  close(on.total.usd, on.self.usd + on.children.usd, 1e-9, '合计 = 自身 + 子代理')
+  assert.equal(on.total.tokens.total, on.self.tokens.total + on.children.tokens.total, 'token 桶也要相加')
+  assert.ok(on.total.models.length >= 1, '给 Top 模型（界面那行要显示）')
+  assert.equal(on.total.models[0].amount !== undefined, true, '模型行要带展示币种金额')
+  // 未知会话：全 0（界面显示 0 / —），不是报错
+  const unknown = summarizeSession(ledger, { sessionId: 'nope', date: dayKey(T0) })
+  assert.equal(unknown.total.calls, 0)
+  assert.equal(unknown.total.cost, null, '没有调用时金额是 null（不是 0）')
+  assert.equal(unknown.total.hitRate, null)
+  // 没给 / 空白 sessionId → null（调用方据此 400）
+  assert.equal(summarizeSession(ledger, { sessionId: '   ', date: dayKey(T0) }), null)
+  assert.equal(summarizeSession(ledger, { date: dayKey(T0) }), null)
+  // 老账本（宿主不给归属信息）要如实说，不能假装算过
+  const legacy = createLedger()
+  appendRecord(legacy, record({ atMs: T0, sessionId: 's-parent' }))
+  const legacySummary = summarizeSession(legacy, { sessionId: 's-parent', date: dayKey(T0), includeSubagent: true })
+  assert.equal(legacySummary.subagentSupported, false, '没有一条带 parentSessionId → 不支持')
+  assert.equal(legacySummary.children.calls, 0)
+  return 'self 2 + 子代理 1 = 3 · 不支持时如实报'
+})
+test('记录上的 parentSessionId 只在给了才写（账本不为这个字段白白多一个 null）', () => {
+  const plain = record({ atMs: T0 })
+  assert.equal('parentSessionId' in plain, false, '没给就不该有这个键')
+  const child = record({ atMs: T0, sessionId: 's-child', parentSessionId: 's-parent' })
+  assert.equal(child.parentSessionId, 's-parent')
+  // 空串 / 非字符串一律不写
+  assert.equal('parentSessionId' in record({ atMs: T0, parentSessionId: '' }), false)
+  assert.equal('parentSessionId' in record({ atMs: T0, parentSessionId: 42 }), false)
+  // 落盘再读回来还在
+  const ledger = createLedger()
+  appendRecord(ledger, child)
+  const reloaded = normalizeLedger(JSON.parse(JSON.stringify(ledger)))
+  assert.equal(reloaded.days[dayKey(T0)].records[0].parentSessionId, 's-parent', '读写一圈不丢')
+  return '只在给了才写 · 往返不丢'
+})
+
 test('增量累加与覆盖式对齐**结果一致**（记账 O(1) 不等于口径漂移）', () => {
   const ledger = createLedger()
   const incremental = createRollup()

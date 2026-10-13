@@ -351,6 +351,8 @@ API Key 对外的**只读**痕迹只有 `hasKey: true/false`。但要说清楚�
 
 ```
 GET    /plugins/dsh-balance-monitor/state                  → { ok, state }
+GET    /plugins/dsh-balance-monitor/session?sessionId=…&includeSubagent=0|1
+                                                           → 该会话今日用量（自身 / 子代理 / 合计）
 GET    /plugins/dsh-balance-monitor/sidebar                → { ok, data }（余额/今日/峰谷相位）
 POST   /plugins/dsh-balance-monitor/type    { provider, type }
 POST   /plugins/dsh-balance-monitor/refresh { provider? }

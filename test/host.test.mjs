@@ -621,11 +621,11 @@ function close(actual, expected, tolerance, label) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${label ?? 'value'}: 期望 ${expected} ± ${tolerance}，实际 ${actual}`)
 }
 /** 喂一段假流（带 usage 块）走完整链路：监听器 → 记账 → 账本 → 侧栏。 */
-async function feedStream({ provider, model, sessionId, inputTokens = 1_000_000 }) {
+async function feedStream({ provider, model, sessionId, inputTokens = 1_000_000, ...extra }) {
   const listener = llmListeners[0]
   assert.equal(typeof listener, 'function', '应注册了 llm/stream 监听器')
   const usage = { inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }
-  const stream = listener({ model, sessionId, provider }, () => (async function* () {
+  const stream = listener({ model, sessionId, provider, ...extra }, () => (async function* () {
     yield { type: 'text', text: 'hi' }
     yield { type: 'usage', usage }
   })())
@@ -1491,6 +1491,40 @@ await test('喂两条不同模型的调用 → heatmap / modelsHistory 都对上
   const sum = Object.values(day.models).reduce((total, row) => total + row.usd, 0)
   close(sum, day.usd, 1e-9, '明细金额之和 = 当日金额')
   return `182 天热力图 · ${data.modelsHistory.rows.length} 个模型 · 明细可加总`
+})
+
+console.log('\n[本会话费用：/session 路由]')
+await test('GET /session：自身 / 子代理 / 合计，子代理要显式开', async () => {
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-parent', inputTokens: 1_000_000 })
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-child', parentSessionId: 'sess-parent', inputTokens: 500_000 })
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-unrelated', inputTokens: 2_000_000 })
+  const off = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-parent')).json.data
+  assert.equal(off.sessionId, 'sess-parent')
+  assert.equal(off.includeSubagent, false)
+  assert.equal(off.self.calls, 1)
+  assert.equal(off.children.calls, 0, '关着时不算子代理')
+  assert.equal(off.total.calls, 1)
+  assert.equal(off.subagentSupported, true, '有带 parentSessionId 的记录 → 归属可用')
+  assert.ok(typeof off.self.amount !== 'undefined', '金额按展示币种给字符串')
+  assert.equal(off.total.cost !== undefined, true)
+  const on = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-parent&includeSubagent=1')).json.data
+  assert.equal(on.includeSubagent, true)
+  assert.equal(on.children.calls, 1, '子代理那次要算进来')
+  assert.equal(on.total.calls, 2)
+  assert.ok(on.total.usd > off.total.usd, '合计金额应更大')
+  assert.equal(on.total.tokens.total, on.self.tokens.total + on.children.tokens.total, 'token 桶相加')
+  assert.ok(on.total.models.length >= 1, '给 Top 模型')
+  // 无关会话不串味
+  const other = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-unrelated&includeSubagent=1')).json.data
+  assert.equal(other.total.calls, 1)
+  // 未知会话：200 但全 0（界面显示 0 / —），不是错误
+  const none = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=does-not-exist')).json.data
+  assert.equal(none.total.calls, 0)
+  assert.equal(none.total.cost, null, '没有调用时金额是 null（不是 0）')
+  // 缺 sessionId → 400；方法不对 → 405
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/session')).statusCode, 400)
+  assert.equal((await call('POST', '/plugins/dsh-balance-monitor/session', { sessionId: 'sess-parent' })).statusCode, 405)
+  return 'self 1 + 子代理 1 = 2 · 未知会话 0 · 缺参 400'
 })
 
 console.log('\n[Host 白名单：挡 DNS rebinding]')
