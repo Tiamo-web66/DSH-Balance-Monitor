@@ -25,6 +25,7 @@ import {
   isPeakHour,
   beijingDayKey,
   makeCallRecord,
+  normalizeOfficialPeak,
   normalizePriceEntry,
   parseCredits,
   phaseAt,
@@ -655,6 +656,77 @@ test('改默认表只影响之后的调用（指纹随之变化）', () => {
     pricingFingerprint({ priceTable: edited }),
     '改单价 → 新指纹（历史记录仍按旧依据）',
   )
+})
+
+console.log('\n[state.json 的 officialPeak 归一：逐字段覆盖 + 打字错保护]')
+test('不是普通对象 → undefined（当作没配，回落默认表）', () => {
+  assert.equal(normalizeOfficialPeak(undefined), undefined)
+  assert.equal(normalizeOfficialPeak(null), undefined)
+  assert.equal(normalizeOfficialPeak('2026-08-01'), undefined)
+  assert.equal(normalizeOfficialPeak([]), undefined)
+  assert.equal(normalizeOfficialPeak(42), undefined)
+})
+test('空对象 → 每个字段都回落默认', () => {
+  const config = normalizeOfficialPeak({})
+  assert.deepEqual(config, DEFAULT_OFFICIAL_PEAK)
+  assert.notEqual(config, DEFAULT_OFFICIAL_PEAK, '应是新对象，不能把默认表本身交出去')
+})
+test('只给 holidays → 只改假期，窗口与三个时刻保持默认', () => {
+  const config = normalizeOfficialPeak({ holidays: ['2026-08-25'] })
+  assert.deepEqual(config.holidays, ['2026-08-25'])
+  assert.deepEqual(config.windows, DEFAULT_OFFICIAL_PEAK.windows)
+  assert.equal(config.effectiveAt, DEFAULT_OFFICIAL_PEAK.effectiveAt)
+  // 2026-08-25 是周二、UTC 01:30 落在高峰窗口；把它列进假期后应判谷
+  assert.equal(isPeakHour(at(TUE_PEAK), DEFAULT_OFFICIAL_PEAK), true)
+  assert.equal(isPeakHour(at(TUE_PEAK), config), false)
+})
+test('显式 windows: [] → 峰谷整体停用（相位 null，全部按谷价档）', () => {
+  const config = normalizeOfficialPeak({ windows: [] })
+  assert.deepEqual(config.windows, [])
+  assert.equal(isPeakHour(at(TUE_PEAK), config), false)
+  assert.equal(phaseAt(at(TUE_PEAK), config), null)
+  assert.deepEqual(upcomingSwitches(at(TUE_PEAK), { config }), [])
+})
+test('显式 holidays: [] → 有效值（没有假期），不是「打字错」', () => {
+  const config = normalizeOfficialPeak({ holidays: [] })
+  assert.deepEqual(config.holidays, [])
+  assert.equal(isPeakHour(at(HOLIDAY), config), true, '国庆不再判谷')
+  assert.equal(isPeakHour(at(HOLIDAY), DEFAULT_OFFICIAL_PEAK), false)
+})
+test('非空数组里一条都不合法 → 回落默认表（不静默丢假期）', () => {
+  const config = normalizeOfficialPeak({ holidays: ['2026/10/01', '国庆', 20261001], windows: [{ start: 99, end: 3 }] })
+  assert.deepEqual(config.holidays, DEFAULT_OFFICIAL_PEAK.holidays)
+  assert.deepEqual(config.windows, DEFAULT_OFFICIAL_PEAK.windows)
+})
+test('假期去重、排序、剔除非法项（合法的照留）', () => {
+  const config = normalizeOfficialPeak({ holidays: ['2026-12-31', 'bad', '2026-01-01', '2026-12-31'] })
+  assert.deepEqual(config.holidays, ['2026-01-01', '2026-12-31'])
+})
+test('窗口数字串也认，越界/非整数的整条丢掉', () => {
+  const config = normalizeOfficialPeak({ windows: [{ start: '6', end: '10' }, { start: 0, end: 24 }, { start: 1.5, end: 4 }] })
+  assert.deepEqual(config.windows, [{ start: 6, end: 10 }])
+})
+test('坏时刻串回落默认，而不是让整段配置失效', () => {
+  const config = normalizeOfficialPeak({ effectiveAt: 'not-a-date', legacyBoundary: '' })
+  assert.equal(config.effectiveAt, DEFAULT_OFFICIAL_PEAK.effectiveAt)
+  assert.equal(config.legacyBoundary, DEFAULT_OFFICIAL_PEAK.legacyBoundary)
+})
+test('enabled: false → 相位 null、永不判峰，档位落回谷价列', () => {
+  const config = normalizeOfficialPeak({ enabled: false })
+  assert.equal(config.enabled, false)
+  assert.equal(isPeakHour(at(TUE_PEAK), config), false)
+  assert.equal(phaseAt(at(TUE_PEAK), config), null)
+  const peak = resolveTier({ model: 'deepseek-v4.1-flash', atMs: at(TUE_PEAK), priceTable: DEFAULT_PRICE_TABLE, officialPeak: DEFAULT_OFFICIAL_PEAK })
+  const off = resolveTier({ model: 'deepseek-v4.1-flash', atMs: at(TUE_PEAK), priceTable: DEFAULT_PRICE_TABLE, officialPeak: config })
+  assert.equal(peak.phase.inPeak, true)
+  assert.equal(off.phase, null)
+  assert.ok(peak.tier.cacheMiss > off.tier.cacheMiss, '停用峰谷后不该再套峰价列')
+})
+test('officialPeak 进指纹：改窗口 → 新依据（历史不重算）', () => {
+  const base = pricingFingerprint({ officialPeak: DEFAULT_OFFICIAL_PEAK })
+  const moved = pricingFingerprint({ officialPeak: normalizeOfficialPeak({ windows: [{ start: 2, end: 5 }] }) })
+  assert.notEqual(base, moved)
+  assert.equal(moved, pricingFingerprint({ officialPeak: normalizeOfficialPeak({ windows: [{ start: 2, end: 5 }] }) }), '同一份配置指纹稳定')
 })
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)
