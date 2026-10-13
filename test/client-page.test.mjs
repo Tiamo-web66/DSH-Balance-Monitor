@@ -53,7 +53,22 @@ function withFrame(frame, fn) {
     return fn()
   } finally {
     currentFrame = savedFrame
+    /**
+     * **hook 数量必须跨渲染稳定**。真 React 见数量变化会抛
+     * `Rendered more hooks than during the previous render`，而这份假渲染器按游标存 hook、
+     * 多出来的 slot 会被静默新建 —— 于是「首帧 `data === null` 早退、数据回来多跑一个 hook」
+     * 这类真 P0（侧栏整块消失）用例全绿也抓不到。这里显式挡一下。
+     */
+    const used = frame.cursor
     frame.cursor = savedCursor
+    if (frame.hookCount === undefined) frame.hookCount = used
+    else if (frame.hookCount !== used) {
+      throw new Error(
+        `hook 数量变了：${frame.hookCount} → ${used}`
+        + '（真 React 会抛 "Rendered more hooks than during the previous render"；'
+        + '把 hook 提到 early return 之前，或把早退改成条件渲染）',
+      )
+    }
   }
 }
 const React = {
