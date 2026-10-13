@@ -1013,16 +1013,25 @@ await test('POST /config：保留期落盘并经报表回传', async () => {
   return '30 / 90'
 })
 
-await test('POST /config：保留期非法值回落默认、日汇总不短于明细、空对象 = 清掉', async () => {
+// ⚠️ 这条用例的语义在「老四块对齐新块规矩」时**有意改过**，把理由写在这里：
+//   早先保留期拿到非法值是**回落默认**（那是 `usage-ledger.js` 的读盘契约），于是
+//   `{ledgerDays:'abc'}` 这种单个字段的笔误会把用户配好的 12/365 整块冲成 7/400，
+//   还连带把没提到的 rollupDays 一起改掉 —— 与 `ui` / `modelCard` / `peakNotify` /
+//   `sessionCost` 那几块的规矩（非法值沿用当前生效值、只有 `null` 才清空）不一致。
+//   现在四块统一成同一套：**非法值沿用当前生效值；`null` / 空对象（= 两个键都没给）才清空回默认**。
+//   读盘侧仍是老规矩（`state.json` 里手写坏值 → 各字段回落默认），未受影响。
+await test('POST /config：保留期非法值沿用当前生效值、日汇总不短于明细、null / 空对象才清掉', async () => {
   const bumped = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 60, rollupDays: 30 } })
   assert.deepEqual(bumped.json.data.retention, { ledgerDays: 60, rollupDays: 60 }, '日汇总应被抬到明细长度')
   const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 'abc', rollupDays: 1e9 } })
-  assert.deepEqual(junk.json.data.retention, { ledgerDays: 7, rollupDays: 400 }, '非法值回落默认（7 / 400）')
+  assert.deepEqual(junk.json.data.retention, { ledgerDays: 60, rollupDays: 60 }, '两个字段都非法 → 沿用当前生效值（不是回落默认 7/400）')
+  const partial = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 'abc' } })
+  assert.deepEqual(partial.json.data.retention, { ledgerDays: 60, rollupDays: 60 }, '只提一个非法字段时，另一个没提的字段也不许被带掉')
   const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: {} })
   assert.deepEqual(cleared.json.data.retention, { ledgerDays: 7, rollupDays: 400 })
   const state = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
   assert.equal(state.retention, undefined, '空对象 = 没配，不该在文件里留一条')
-  return '60/60 · 默认 7/400 · 已清空'
+  return '60/60 · 非法沿用现值 · 空对象才清空'
 })
 
 await test('配置重载后预算额度仍是 null（loadStore 不能被 Number(null)=0 骗）', async () => {
@@ -1617,10 +1626,10 @@ await test('GET /report 下发密钥扫描配置（界面要能回填与编辑�
   assert.deepEqual(saved.json.data.keyDiscovery, { scanCredentialsFile: false, prefixes: ['MY_KEY'], maxIndex: 3 })
   const after = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
   assert.deepEqual(after, saved.json.data.keyDiscovery, '报表与 /config 回传要一致')
-  // 上限越界 → 清掉该项（回落默认 9）；空前缀列表 → 也回落默认
+  // 上限越界（非法值）→ 沿用当前生效值（上面刚设的 3）；空前缀列表 = 清掉自定义前缀 → 回默认两条
   const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeyMaxIndex: 999, deepseekKeyPrefixes: [] })
-  assert.equal(junk.json.data.keyDiscovery.maxIndex, 9)
-  assert.deepEqual(junk.json.data.keyDiscovery.prefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'])
+  assert.equal(junk.json.data.keyDiscovery.maxIndex, 3, '越界值沿用当前生效值（与 ui / modelCard 同一套规矩），不回落默认 9')
+  assert.deepEqual(junk.json.data.keyDiscovery.prefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], '空数组 = 清掉自定义前缀')
   // 收尾：回到默认（前缀清空 = 用默认；上限传 null = 清掉；文件扫描重新打开）
   await call('POST', '/plugins/dsh-balance-monitor/config', {
     scanCredentialsFile: true, deepseekKeyPrefixes: [], deepseekKeyMaxIndex: null,
@@ -1845,6 +1854,103 @@ await test('allowedHosts 是逃生门：列出后放行，且不影响跨站判�
   assert.deepEqual(restored, [], 'null = 回默认')
   return '显式列出才放行'
 })
+console.log('\n[老四块与新区块同一套规矩：非法值沿用当前生效值，只有 null 才清空]')
+await test('保留期 / 序号上限 / 候选前缀 / Host 白名单：一份非法值不再把它们一次冲掉', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  // 四块都设成非默认值 —— 这是对抗式审计的最小复现（旧写法提交下面那份非法值时会被冲掉）
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    retention: { ledgerDays: 12, rollupDays: 365 },
+    deepseekKeyMaxIndex: 20,
+    deepseekKeyPrefixes: ['MY_KEY'],
+    allowedHosts: ['panel.example:443'],
+  })
+  assert.equal(saved.statusCode, 200, JSON.stringify(saved.json).slice(0, 200))
+  assert.deepEqual(saved.json.data.retention, { ledgerDays: 12, rollupDays: 365 })
+  assert.deepEqual(saved.json.data.keyDiscovery.prefixes, ['MY_KEY'])
+  assert.equal(saved.json.data.keyDiscovery.maxIndex, 20)
+  assert.deepEqual(saved.json.data.allowedHosts, ['panel.example:443'])
+
+  // 再提交一份「形状 / 类型非法」的值：逐块沿用当前生效值，一个键都不该被删
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    retention: { ledgerDays: 'abc' },
+    deepseekKeyMaxIndex: 'abc',
+    deepseekKeyPrefixes: 'MY_KEY',
+    allowedHosts: 'panel.example:443',
+  })
+  assert.equal(junk.statusCode, 200, JSON.stringify(junk.json).slice(0, 200))
+  assert.deepEqual(junk.json.data.retention, { ledgerDays: 12, rollupDays: 365 }, '保留期非法值沿用现值（不是回落默认 7/400）')
+  assert.equal(junk.json.data.keyDiscovery.maxIndex, 20, '序号上限非法值沿用现值（不是回落默认 9）')
+  assert.deepEqual(junk.json.data.keyDiscovery.prefixes, ['MY_KEY'], '前缀传字符串 = 非法 → 沿用现值')
+  assert.deepEqual(junk.json.data.allowedHosts, ['panel.example:443'], '白名单传字符串 = 非法 → 沿用现值')
+
+  // 立刻回读：报表 payload 与磁盘上的 state.json 都不能变
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.deepEqual(report.retention, { ledgerDays: 12, rollupDays: 365 })
+  assert.equal(report.keyDiscovery.maxIndex, 20)
+  assert.deepEqual(report.keyDiscovery.prefixes, ['MY_KEY'])
+  assert.deepEqual(report.allowedHosts, ['panel.example:443'])
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(onDisk.retention, { ledgerDays: 12, rollupDays: 365 }, '那几条配置在文件里也要还在')
+  assert.equal(onDisk.deepseekKeyMaxIndex, 20)
+  assert.deepEqual(onDisk.deepseekKeyPrefixes, ['MY_KEY'])
+  assert.deepEqual(onDisk.allowedHosts, ['panel.example:443'])
+
+  // `null` 才是清空：四块各自回默认
+  const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    retention: null, deepseekKeyMaxIndex: null, deepseekKeyPrefixes: [], allowedHosts: null,
+  })
+  assert.deepEqual(cleared.json.data.retention, { ledgerDays: 7, rollupDays: 400 }, 'null = 清空回默认')
+  assert.equal(cleared.json.data.keyDiscovery.maxIndex, 9)
+  assert.deepEqual(cleared.json.data.keyDiscovery.prefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'])
+  assert.deepEqual(cleared.json.data.allowedHosts, [])
+  const after = JSON.parse(readFileSync(file, 'utf8'))
+  for (const key of ['retention', 'deepseekKeyMaxIndex', 'deepseekKeyPrefixes', 'allowedHosts']) {
+    assert.equal(after[key], undefined, `${key} 清空后不该在文件里留一条`)
+  }
+  return '非法值守住现值 · null 才清空'
+})
+
+console.log('\n[请求体：体积超限与 JSON 坏掉要说两句不同的话]')
+await test('17KB 的 body → 400 且文案是「请求体过大」（不是 invalid json body）', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', { pad: 'x'.repeat(17 * 1024) })
+  assert.equal(res.statusCode, 400)
+  assert.match(res.json.error, /过大/)
+  assert.notEqual(res.json.error, 'invalid json body', '体积超限不该被说成 JSON 解析失败')
+  return res.json.error
+})
+await test('超限后把剩下的分片读干净（不许半路 return 让连接悬着）', async () => {
+  // 4 片共约 23KB：第 3 片就越界了，第 4 片必须继续被读掉（旧写法在第 3 片就 return）
+  const parts = [
+    Buffer.from(JSON.stringify({ pad: 'x'.repeat(7 * 1024) })),
+    Buffer.from('x'.repeat(7 * 1024)),
+    Buffer.from('x'.repeat(7 * 1024)),
+    Buffer.from('x'.repeat(2 * 1024)),
+  ]
+  let pulled = 0
+  const req = {
+    method: 'POST', url: '/plugins/dsh-balance-monitor/config', headers: {},
+    async *[Symbol.asyncIterator]() { for (const part of parts) { pulled += 1; yield part } },
+  }
+  const res = makeRes()
+  await routes[0].handler(req, res)
+  assert.equal(res.statusCode, 400)
+  assert.equal(pulled, parts.length, `超限后要把剩下的分片读完：只读了 ${pulled} / ${parts.length} 片`)
+  assert.match(res.json.error, /过大/)
+  return `${parts.length} 片全读完 · ${res.json.error}`
+})
+await test('真正坏掉的 JSON 仍是「JSON 解析失败」那条文案（与「过大」区分）', async () => {
+  const req = {
+    method: 'POST', url: '/plugins/dsh-balance-monitor/config', headers: {},
+    async *[Symbol.asyncIterator]() { yield Buffer.from('{oops') },
+  }
+  const res = makeRes()
+  await routes[0].handler(req, res)
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.json.error, 'invalid json body')
+  assert.equal(/过大/.test(res.json.error), false)
+  return res.json.error
+})
+
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed} 通过 / ${failed} 失败`)
 process.exit(failed === 0 ? 0 : 1)
