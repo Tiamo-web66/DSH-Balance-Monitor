@@ -26,18 +26,43 @@ function test(name, fn) {
   }
 }
 
-// ── 迷你 React：state 按「渲染顺序的组件帧」存，effect 只在挂载时跑一次 ──
-// 帧池**按根组件隔离**：设置页与侧栏是两个不同的槽位组件，共用一份帧会把状态串起来。
-const framePools = new Map()
-let frames = []
-let frameIndex = 0
+// ── 迷你 React：state 与 effect 按**组件身份**存（WeakMap），effect 只在挂载时跑一次 ──
+//
+// 这里曾经按「渲染顺序的下标」存帧，结果是：切分页之后同一个下标会被另一个组件占用，
+// 两个组件的 state 互相覆盖（概览页去读显示页写进去的 null 就炸了）。
+// React 本来就是按组件身份存 hook 状态的，所以这里也照做 —— 顺带消掉了
+// 「嵌套组件的状态写不进去」那条老限制。
+const componentFrames = new WeakMap()
+let currentFrame = null
 let dirty = false
+function frameFor(component) {
+  let frame = componentFrames.get(component)
+  if (frame === undefined) {
+    frame = { slots: [], effects: [], cursor: 0 }
+    componentFrames.set(component, frame)
+  }
+  return frame
+}
+/** 进入一个组件：切 currentFrame 并把该组件的 hook 游标归零。 */
+function withFrame(frame, fn) {
+  const savedFrame = currentFrame
+  const savedCursor = frame.cursor
+  frame.cursor = 0
+  currentFrame = frame
+  try {
+    return fn()
+  } finally {
+    currentFrame = savedFrame
+    frame.cursor = savedCursor
+  }
+}
 const React = {
   createElement(type, props, ...children) {
     return { type, props: { ...(props ?? {}), children: children.flat(Infinity).filter(child => child !== null && child !== undefined && child !== false) } }
   },
   useState(initial) {
-    const frame = frames[frameIndex] ?? (frames[frameIndex] = { slots: [], effects: [], cursor: 0 })
+    const frame = currentFrame
+    if (frame === null) return [typeof initial === 'function' ? initial() : initial, () => {}]
     const cursor = frame.cursor++
     if (frame.slots[cursor] === undefined) frame.slots[cursor] = { value: typeof initial === 'function' ? initial() : initial }
     const slot = frame.slots[cursor]
@@ -50,7 +75,8 @@ const React = {
     }]
   },
   useEffect(effect) {
-    const frame = frames[frameIndex] ?? (frames[frameIndex] = { slots: [], effects: [], cursor: 0 })
+    const frame = currentFrame
+    if (frame === null) return
     const cursor = frame.cursor++
     if (frame.effects[cursor] === true) return
     frame.effects[cursor] = true
@@ -75,6 +101,8 @@ const REPORT = {
   keyDiscovery: { scanCredentialsFile: true, prefixes: ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], maxIndex: 9 },
   // Host 白名单（默认空 = 只允许回环；这里给一条，验证界面能回填与保存）
   allowedHosts: ['panel.example.com'],
+  // 界面偏好（语言 / 轮询间隔 / 隐藏敏感区块 / 会话 ID）
+  ui: { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false },
   officialPeak: {
     enabled: true,
     effectiveAt: '2026-08-01T00:00:00Z',
@@ -259,28 +287,17 @@ function component(name, index = 0) {
 }
 /**
  * 只在**挂载**时跑状态机：反复渲染直到没有 setState。
- * state 存进 frames（按渲染顺序的组件帧），effect 只在挂载时执行一次。
+ * state 与 effect 记在组件自己的帧里（WeakMap，按组件身份），effect 只在挂载时执行一次。
  */
 function mount(component, props = {}, visit = null) {
-  if (!framePools.has(component)) framePools.set(component, [])
-  frames = framePools.get(component)
   let tree = null
   for (let pass = 0; pass < 10; pass += 1) {
     dirty = false
-    frameIndex = 0
-    const frame = frames[0] ?? (frames[0] = { slots: [], effects: [], cursor: 0 })
-    frame.cursor = 0
-    let tree
-    try {
-      // 根组件吃第 0 帧；它内部嵌套的组件由 walkNode 展开时依次吃第 1、2… 帧
-      tree = component(props)
-      // 嵌套组件也要在**状态化**的这一遍里展开一次：否则它们的 effect 永远不跑
-      // （余额明细、密钥编辑区这类子组件就是靠 effect 首次加载的）。
-      frameIndex = 1
-      walkNode(tree, visit ?? (() => {}))
-    } finally {
-      frameIndex = 0
-    }
+    // 根组件用自己的帧；它内部嵌套的组件由 walkNode 展开时各自进入自己的帧
+    tree = withFrame(frameFor(component), () => component(props))
+    // 嵌套组件也要在**状态化**的这一遍里展开一次：否则它们的 effect 永远不跑
+    // （余额明细、密钥编辑区这类子组件就是靠 effect 首次加载的）。
+    walkNode(tree, visit ?? (() => {}))
     if (!dirty) return tree
   }
   return null
@@ -305,12 +322,13 @@ function readonly(fn) {
   const savedState = React.useState
   const savedEffect = React.useEffect
   React.useState = initial => {
-    const frame = frames[frameIndex]
-    const cursor = frame === undefined ? 0 : frame.cursor++
-    const slot = frame === undefined ? undefined : frame.slots[cursor]
+    const frame = currentFrame
+    if (frame === null) return [typeof initial === 'function' ? initial() : initial, () => {}]
+    const cursor = frame.cursor++
+    const slot = frame.slots[cursor]
     if (slot !== undefined) return [slot.value, () => {}]
     const value = typeof initial === 'function' ? initial() : initial
-    if (frame !== undefined) frame.slots[cursor] = { value }
+    frame.slots[cursor] = { value }
     return [value, () => {}]
   }
   React.useEffect = () => {}
@@ -323,14 +341,7 @@ function readonly(fn) {
 }
 
 function render(element) {
-  const savedIndex = frameIndex
-  // 树里的子组件从第 1 帧起（第 0 帧是根组件，已在 mount 时跑过）
-  frameIndex = 1
-  try {
-    return readonly(() => renderNode(element))
-  } finally {
-    frameIndex = savedIndex
-  }
+  return readonly(() => renderNode(element))
 }
 function renderNode(element) {
   if (element === null || element === undefined || typeof element === 'boolean') return ''
@@ -338,30 +349,17 @@ function renderNode(element) {
   if (Array.isArray(element)) return element.map(renderNode).join('')
   const { type, props } = element
   if (typeof type === 'function') {
-    const frame = frames[frameIndex] ?? (frames[frameIndex] = { slots: [], effects: [], cursor: 0 })
-    frame.cursor = 0
-    frameIndex += 1
-    try {
-      return renderNode(type(props))
-    } finally {
-      frameIndex -= 1
-    }
+    return withFrame(frameFor(type), () => renderNode(type(props)))
   }
   return renderNode(props?.children ?? [])
 }
-/** 原始遍历（组件会展开一次；这里自行维护帧序号，与 render 的顺序一致）。 */
+/** 原始遍历（组件会展开一次；每个组件进入自己的帧）。 */
 function walkNode(element, visit) {
   if (element === null || element === undefined || typeof element !== 'object') return
   if (Array.isArray(element)) { for (const child of element) walkNode(child, visit); return }
   visit(element)
   if (typeof element.type === 'function') {
-    const frame = frames[frameIndex] ?? (frames[frameIndex] = { slots: [], effects: [], cursor: 0 })
-    frameIndex += 1
-    try {
-      walkNode(element.type(element.props), visit)
-    } finally {
-      frameIndex -= 1
-    }
+    withFrame(frameFor(element.type), () => walkNode(element.type(element.props), visit))
     return
   }
   walkNode(element.props?.children, visit)
@@ -395,6 +393,31 @@ function clickText(element, label) {
   return clicked
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+/**
+ * 按「标签文字」找勾选框：`h('label', {...}, h('input',{type:'checkbox'}), '文案')` 这种写法下，
+ * 只要拿 label 的 children 就能把 input 和它的文案配对。**不按下标**取 ——
+ * 设置页会不断加分组，按下标写死的用例一加东西就碎。
+ * @returns {Array<{ text: string, props: object }>}
+ */
+function checkboxes(element) {
+  const out = []
+  walk(element, node => {
+    if (node.type !== 'label') return
+    const kids = node.props?.children ?? []
+    const input = kids.find(child => child?.type === 'input' && child.props?.type === 'checkbox')
+    if (input === undefined) return
+    const text = kids.filter(child => child !== input).map(child => render(child)).join('')
+    out.push({ text, props: input.props })
+  })
+  return out
+}
+/** 找勾选框并返回它的 props（找不到就抛，别让用例静默跳过）。 */
+function checkbox(element, text) {
+  const found = checkboxes(element).find(item => item.text === text)
+  assert.ok(found !== undefined, `找不到勾选框「${text}」，实际：${checkboxes(element).map(item => item.text).join(' / ')}`)
+  return found.props
+}
 
 console.log('\n[设置页「余额与费用」渲染]')
 const section = component('settings.section')
@@ -485,16 +508,11 @@ test('「显示」页带峰谷提醒两个勾选框，且回填宿主的开关',
   for (const needle of ['峰谷提醒', '应用内提醒', '系统通知']) {
     assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
   }
-  // 勾选框顺序＝分组顺序：峰谷提醒（应用内 / 系统）→ 密钥扫描 → 官方峰谷
-  const boxes = []
-  walk(page, node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
-  assert.equal(boxes.length, 4, `应有四个勾选框，实际 ${boxes.length}`)
-  assert.equal(boxes[0].checked, true, '应用内提醒应回填宿主送来的 true')
-  assert.equal(boxes[1].checked, false, '系统通知应回填 false')
-  return '四段勾选框 · 应用内=真 / 系统=假'
+  assert.equal(checkbox(page, '应用内提醒').checked, true, '应用内提醒应回填宿主送来的 true')
+  assert.equal(checkbox(page, '系统通知').checked, false, '系统通知应回填 false')
+  return `按文案取勾选框 · 共 ${checkboxes(page).length} 个`
 })
-test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主的值', () => {
-  const page = mount(CostPage)
+test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主的值', () => {  const page = mount(CostPage)
   const html = render(page)
   for (const needle of ['密钥扫描', '读凭据文件的引用名', '候选前缀', '序号上限', '保存扫描设置',
     '访问控制', '额外允许的主机名', '保存白名单',
@@ -509,6 +527,28 @@ test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主�
   assert.ok(values.includes('2026-10-01, 2026-10-02'), `假期应回填：${values.join(' | ')}`)
   assert.ok(values.includes('panel.example.com'), `Host 白名单应回填：${values.join(' | ')}`)
   return '三段控件齐全且回填宿主值'
+})
+test('「显示」页带「界面」段：语言选择器 + 轮询间隔 + 三个隐藏/显示开关', () => {
+  const page = mount(CostPage)
+  const html = render(page)
+  for (const needle of ['界面', '界面语言', '跟随浏览器', '简体中文', 'English',
+    '侧栏刷新间隔（秒）', '保存间隔', '隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID']) {
+    assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
+  }
+  // 回填：语言选择器当前值 = auto，轮询间隔 = 30，三个开关默认关
+  let localeSelect = null
+  walk(page, node => {
+    if (node.type === 'select' && String(node.props?.value) === 'auto') localeSelect = node
+  })
+  assert.ok(localeSelect !== null, '语言选择器应回填 auto')
+  const seconds = []
+  walk(page, node => { if (node.type === 'input' && node.props?.min === '10') seconds.push(node.props) })
+  assert.equal(seconds.length, 1, `应有一个轮询间隔输入框（min=10），实际 ${seconds.length}`)
+  assert.equal(Number(seconds[0].value), 30, '间隔应回填宿主的 30')
+  for (const label of ['隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID']) {
+    assert.equal(checkbox(page, label).checked, false, `「${label}」默认应关`)
+  }
+  return '语言 / 间隔 / 三个开关都在'
 })
 
 console.log('\n[交互：按钮真的打到宿主路由]')
@@ -546,15 +586,13 @@ await (async () => {
     return 'POST /config { retention }'
   })
   // 再点一次「应用内提醒」勾选框（取消勾选）→ 白名单局部覆盖
-  const boxes = []
-  walk(mount(CostPage), node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
-  // 第 0 个永远是「应用内提醒」（分组顺序见上），后面几个是密钥扫描 / 官方峰谷
-  const toggled = boxes.length >= 2 && boxes[0].checked === true
-  if (toggled) boxes[0].onChange({ target: { checked: false } })
+  const notifyBox = checkbox(mount(CostPage), '应用内提醒')
+  const toggled = notifyBox.checked === true
+  if (toggled) notifyBox.onChange({ target: { checked: false } })
   await tick()
   await tick()
   test('点「应用内提醒」→ POST /config 只带 peakNotify.enabled（局部补丁，不带别的位）', () => {
-    assert.ok(toggled, `应能拿到两个勾选框并找到已勾上的「应用内提醒」，实际 ${boxes.length} 个`)
+    assert.ok(toggled, '应能按文案拿到「应用内提醒」勾选框并取消它')
     const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
     assert.ok(hit !== undefined, '没有发出 /config 请求')
     const body = JSON.parse(hit.body)
@@ -602,6 +640,28 @@ await (async () => {
     assert.equal(body.display, undefined, '白名单不该顺手提交展示设置')
     return 'POST /config { allowedHosts }'
   })
+  // 界面：轮询间隔 + 两个隐藏开关（各自独立保存，都不带 display）
+  const refreshClicked = clickText(mount(CostPage), '保存间隔')
+  await tick()
+  await tick()
+  test('点「保存间隔」→ POST /config { ui: { refreshSeconds } }', () => {
+    assert.ok(refreshClicked, '没找到「保存间隔」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.ui, { refreshSeconds: 30 }, `实际提交：${hit.body}`)
+    assert.equal(body.display, undefined, '界面偏好不该顺手提交展示设置')
+    return 'POST /config { ui: { refreshSeconds: 30 } }'
+  })
+  const hideToggled = checkbox(mount(CostPage), '隐藏官方余额')
+  hideToggled.onChange({ target: { checked: true } })
+  await tick()
+  await tick()
+  test('勾「隐藏官方余额」→ POST /config { ui: { hideOfficialBalance: true } }（勾选即写）', () => {
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.ui, { hideOfficialBalance: true }, `实际提交：${hit.body}`)
+    return 'POST /config { ui: { hideOfficialBalance: true } }'
+  })
   // 宿主把空数组当**有效值**（`windows: []` = 永不判峰 → 所有调用按谷价计价），
   // 所以「清空输入框」必须解释成「沿用默认」，否则用户以为在恢复默认、其实改了计价。
   // 夹具改完要**逼 store 重新拉一次 /report**（fetch 是 JSON 往返的深拷贝，改夹具不会自动生效）——
@@ -642,25 +702,113 @@ await (async () => {
     return `${writes.length} 次写请求全部带 JSON 类型`
   })
   test('窗口写法非法 → 保存按钮禁用 + 给出提示（不猜用户的意图）', () => {
-    // 说明：这里**不**通过输入框改值来测非法态 —— 本假渲染器的帧游标按渲染顺序分配，
-    // 嵌套组件（DisplayTab 在 CostPage 里）的状态写入不会在下一次 render 里被读回
-    // （与下面密钥行那条注释同因）。所以非法态的**判定**由 lib 侧的纯函数用例覆盖
-    // （test/pricing.test.mjs 的 normalizeOfficialPeak 一组），这里只锁「合法值下按钮可用、
-    // 且控件都真的接上了自己的 handler」这条契约。
-    const page = mount(CostPage)
-    let submit = null
-    const windowInputs = []
-    walk(page, node => {
-      if (node.type === 'button' && render(node.props?.children) === '保存峰谷') submit = node
-      if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') windowInputs.push(node.props)
+    // 帧改成按组件身份存之后，这里可以直接改输入框了（会真的走一遍 patchPeak → setDraft）
+    let typed = false
+    mount(CostPage, {}, node => {
+      if (typed) return
+      if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') {
+        typed = true
+        node.props.onChange({ target: { value: '1-4, oops' } })
+      }
     })
-    assert.ok(submit !== null, '没找到「保存峰谷」按钮')
-    assert.equal(submit.props.disabled, false, '合法窗口（1-4,6-10）时按钮应可用')
-    assert.equal(windowInputs.length, 1, `应有一个窗口输入框，实际 ${windowInputs.length}`)
-    assert.equal(typeof windowInputs[0].onChange, 'function', '输入框必须接上 onChange')
-    const html = render(page)
-    assert.ok(!html.includes('窗口格式不对'), '合法值不该显示格式提示')
-    return '合法值可用 · 非法态由纯函数用例覆盖'
+    assert.ok(typed, '应能定位到窗口输入框并改值')
+    const after = mount(CostPage)
+    const html = render(after)
+    assert.ok(html.includes('窗口格式不对'), `应给出格式提示：${html.slice(-300)}`)
+    let submit = null
+    walk(after, node => { if (node.type === 'button' && render(node.props?.children) === '保存峰谷') submit = node })
+    assert.equal(submit?.props?.disabled, true, '非法窗口时保存按钮应是禁用态')
+    const before = calls.filter(call => call.path.endsWith('/config')).length
+    submit.props.onClick?.()
+    assert.equal(calls.filter(call => call.path.endsWith('/config')).length, before, '非法值不该发出请求')
+    // 复原：改回合法值，别给后面的用例留脏编辑态
+    mount(CostPage, {}, node => {
+      if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') node.props.onChange({ target: { value: '1-4,6-10' } })
+    })
+    return '禁用 + 提示 · 不发请求'
+  })
+  test('退化窗口（5-5）与超量窗口（>24 条）同样当非法', () => {
+    const many = Array.from({ length: 25 }, (_, index) => `${index % 12}-${(index % 12) + 1}`).join(',')
+    for (const bad of ['5-5', many, '24-25']) {
+      const before = calls.filter(call => call.path.endsWith('/config')).length
+      mount(CostPage, {}, node => {
+        if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') node.props.onChange({ target: { value: bad } })
+      })
+      const html = render(mount(CostPage))
+      assert.ok(html.includes('窗口格式不对'), `「${bad}」应判非法：${html.slice(-200)}`)
+      assert.equal(calls.filter(call => call.path.endsWith('/config')).length, before, `「${bad}」不该发请求`)
+    }
+    mount(CostPage, {}, node => {
+      if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') node.props.onChange({ target: { value: '1-4,6-10' } })
+    })
+    return '5-5 · 25 条 · 24-25 都拒'
+  })
+})()
+
+console.log('\n[界面偏好真的生效：隐藏区块 / 会话 ID / 语言切换]')
+await (async () => {
+  const savedUi = { ...REPORT.ui }
+  // 改夹具后要逼 store 重新拉一次 /report（fetch 走 JSON 往返，改夹具不会自动生效）：
+  // 借「保存保留期」那次 saveConfig → load 把新数据带进来。
+  const reload = async () => {
+    // 先让上一条「保存 → 重新拉取」的链跑完：saveConfig 在 busy 时会直接 return，
+    // 撞上了就点不动（点了也没发请求）。
+    await tick()
+    await tick()
+    await tick()
+    // 语言可能是中文或英文（前面的用例切过），分页与按钮文案会跟着变 —— 两版都试
+    if (!clickText(mount(CostPage), '显示')) clickText(mount(CostPage), 'Display')
+    if (!clickText(mount(CostPage), '保存保留期')) clickText(mount(CostPage), 'Save retention')
+    await tick()
+    await tick()
+    await tick()
+  }
+  const tab = label => { clickText(mount(CostPage), label); return render(mount(CostPage)) }
+
+  REPORT.ui = { ...savedUi, hideOfficialBalance: true, hideTodayCost: true }
+  await reload()
+  test('隐藏官方余额 / 隐藏今日消耗：概览页对应区块不渲染', () => {
+    const html = tab('概览')
+    assert.ok(!html.includes('官方账户余额'), `余额区块不该渲染：${html.slice(0, 200)}`)
+    assert.ok(!html.includes('今日费用'), '今日卡片不该渲染')
+    assert.ok(html.includes('本月费用'), '本月卡片照旧')
+    assert.ok(html.includes('累计费用'), '累计卡片照旧')
+    return '两块不渲染 · 本月/累计照旧'
+  })
+
+  REPORT.ui = { ...savedUi }
+  await reload()
+  test('会话明细默认只给前 14 位会话 ID', () => {
+    const short = tab('概览')
+    assert.ok(short.includes('session-unpri'), '前 14 位应在')
+    assert.ok(!short.includes('session-unpriced'), `默认不该给完整 ID：${short.slice(0, 120)}`)
+    return '默认 session-unpri（14 位）'
+  })
+
+  REPORT.ui = { ...savedUi, showSessionId: true }
+  await reload()
+  test('打开「显示完整会话 ID」后给全长', () => {
+    const html = tab('概览')
+    assert.ok(html.includes('session-unpriced'), `应给完整 ID：${html.slice(0, 200)}`)
+    return '完整 ID 已显示'
+  })
+
+  REPORT.ui = { ...savedUi, locale: 'en' }
+  await reload()
+  test('语言切到 en：整页文案立刻变英文（不刷新页面）', () => {
+    const html = render(mount(CostPage))
+    assert.ok(html.includes('Interface'), `应出现英文分组标题：${html.slice(0, 300)}`)
+    assert.ok(!html.includes('界面语言'), '中文文案应消失')
+    return 'en 生效'
+  })
+
+  REPORT.ui = savedUi
+  await reload()
+  test('切回 auto：跟随浏览器（夹具是 zh-CN）→ 回到中文', () => {
+    const html = render(mount(CostPage))
+    assert.ok(html.includes('界面语言'), `应回到中文：${html.slice(0, 300)}`)
+    assert.ok(!html.includes('Interface'), '英文文案应消失')
+    return 'auto → zh'
   })
 })()
 
@@ -765,6 +913,10 @@ await (async () => {
     assert.ok(openedSchedule.includes('10-13'), '每行应带本地时刻（月-日 时:分）')
     return '收起 → 展开 · 2 个切换点'
   })
+  // 侧栏那侧的「隐藏区块」没在这里单测：夹具是 JSON 深拷贝，改完要重新拉 /sidebar 才生效，
+  // 而侧栏 store 在 IIFE 里被同名的槽位变量遮住了、够不到（30s 轮询与 focus 在假 window 里也不跑）。
+  // 只要 `/sidebar` 带 `ui`（host 用例已断言）并且组件按 `ui.hide*` 分支渲染（代码只有两处），
+  // 覆盖就够；真正的手点验证留到真宿主里做。
 })()
 
 console.log('\n[供应商卡片：DeepSeek 的多把 key 编辑区]')

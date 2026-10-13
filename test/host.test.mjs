@@ -1035,6 +1035,47 @@ await test('officialPeak 随 state.json 重载（loadStore 认这个键，非法
 })
 
 
+console.log('\n[界面偏好：语言 / 轮询间隔 / 隐藏区块 / 会话 ID]')
+await test('三处 payload 共用同一份 ui（/state、/sidebar、/report）', async () => {
+  const expected = { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false }
+  const state = (await call('GET', '/plugins/dsh-balance-monitor/state')).json.state.ui
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.ui
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.ui
+  assert.deepEqual(state, expected, '状态接口应带 ui')
+  assert.deepEqual(sidebar, expected, '侧栏应带 ui（轮询间隔也从这拿）')
+  assert.deepEqual(report, expected, '设置页应带 ui')
+  return '三处一致'
+})
+await test('POST /config：ui 是局部补丁，只沉淀与默认不同的字段', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { locale: 'en' } })
+  assert.equal(saved.json.data.ui.locale, 'en')
+  assert.equal(saved.json.data.ui.refreshSeconds, 30, '没给的字段保持默认')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).ui, { locale: 'en' },
+    '只把改动过的键写进文件（不动配置就不该平白多出一段）')
+  // 局部补丁：只改间隔不会把语言带掉
+  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 15 } })
+  assert.equal(patched.json.data.ui.locale, 'en', '语言要保住')
+  assert.equal(patched.json.data.ui.refreshSeconds, 15)
+  // 非法值保持原值（越界间隔 / 不认识的语言）
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 5, locale: 'fr' } })
+  assert.equal(junk.json.data.ui.refreshSeconds, 15, '越界间隔保持原值')
+  assert.equal(junk.json.data.ui.locale, 'en', '不认识的语言保持原值')
+  // 三个布尔开关
+  const flags = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    ui: { hideOfficialBalance: true, hideTodayCost: true, showSessionId: true },
+  })
+  assert.equal(flags.json.data.ui.hideOfficialBalance, true)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).ui,
+    { locale: 'en', refreshSeconds: 15, hideOfficialBalance: true, hideTodayCost: true, showSessionId: true })
+  // null = 回默认
+  const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: null })
+  assert.deepEqual(cleared.json.data.ui,
+    { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false })
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).ui, undefined, '回默认 = 文件里不留一条')
+  return '局部补丁 · 非法保持 · null 回默认'
+})
+
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
   // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')

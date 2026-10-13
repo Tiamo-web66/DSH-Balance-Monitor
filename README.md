@@ -7,7 +7,22 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 
 只支持 Sub2Api 一种中转站类型（按用户决定，`New API` 类型暂不做）。
 
-### 0.7.0 改了什么（本轮收口）
+### 0.8.0：按 `dsh-cost-meter` 补齐界面 —— T1 档
+
+参照的是本机装的 `dsh-cost-meter` v1.7.44（就是本文反复提到的「参照实现」）。分四档推进，
+**本轮只做 T1**（小改、零设计冲突）；T2/T3/T4 见第七节末尾的「还差什么」。
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 界面语言 | 只能按 `navigator.language` 硬判，没入口 | `ui.locale` = `auto` / `zh` / `en`，设置页「显示 → 界面」可选，**切换即时生效**（整表重建 S/S2 并让三个 store 一起重渲染，不用刷新页面） |
+| 侧栏轮询间隔 | 写死 30 秒 | `ui.refreshSeconds`，界面可调 10–60 秒（只影响侧栏取数节奏，不影响记账） |
+| 隐藏敏感区块 | 没有（共享屏幕会把余额/花费露出来） | `ui.hideOfficialBalance` / `ui.hideTodayCost`：对应区块**整体不渲染**（侧栏余额行、今日行，概览的今日卡与官方余额段）；token 与调用次数统计不受影响 |
+| 会话 ID | 明细里一律只给前 14 位 | `ui.showSessionId`：打开后给全长（便于去日志里对） |
+
+配置走 `state.json` 的 `ui` 块，`/config` 是**局部补丁**（改一个控件不会带掉别的位），
+且只沉淀「与默认不同」的字段 —— 不动配置就不会平白多出一段。
+
+### 0.7.0：officialPeak 接通 + 拦截面 + 一轮 bug 收口
 
 | 项 | 之前 | 现在 |
 |---|---|---|
@@ -101,7 +116,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**访问控制**（Host 白名单，反代 / 自定义域名部署用）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
+| **显示** | **界面**（语言 `auto`/`zh`/`en`、侧栏刷新间隔 10–60 秒、隐藏官方余额 / 隐藏今日消耗、会话明细显示完整 ID）；币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**访问控制**（Host 白名单，反代 / 自定义域名部署用）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
 
 **本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
 `storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
@@ -258,6 +273,7 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   "deepseekKeyMaxIndex": 9,
   "scanCredentialsFile": false,
   "allowedHosts": ["panel.example.com", "192.168.1.10:3080"],
+  "ui": { "locale": "zh", "refreshSeconds": 15, "hideOfficialBalance": true, "hideTodayCost": true, "showSessionId": true },
   "priceSources": ["official", "station", "manual"],
   "priceTable": { "models": { }, "providers": { }, "aliases": { } }
 }
@@ -283,6 +299,11 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `allowedHosts`：额外允许的 `Host` 列表（`host[:port]`，小写，最多 20 条），设置页「显示 → 访问控制」可改。
   默认空 = **只接受回环地址**（见第五节的 DNS rebinding 防护）；反代 / 自定义域名 / 局域网访问时把主机名写进来。
   它只放宽 `Host` 判据，不影响跨站判据。
+- `ui`：界面偏好，设置页「显示 → 界面」可改（`/state`、`/sidebar`、`/report` 三处一起下发，客户端共用一份）：
+  `locale`（`auto` = 跟随浏览器 / `zh` / `en`，切换即时生效）、`refreshSeconds`（10–60，侧栏轮询间隔）、
+  `hideOfficialBalance` / `hideTodayCost`（对应区块整体不渲染，截屏防泄露）、`showSessionId`（会话明细给全长 ID）。
+  与 `officialPeak` 同一套规矩：`/config` 是**局部补丁**（没给的键沿用当前值，`null` 才是清空），
+  且只沉淀与默认不同的字段。
 - `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
   卡片上的密钥编辑区会自动维护它；侧栏余额 = 各把之和（币种不一致就不给总额）。
 - `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
@@ -323,7 +344,7 @@ POST   /plugins/dsh-balance-monitor/vision/apply { provider? }
 GET    /plugins/dsh-balance-monitor/report                 → { ok, data }（设置页「余额与费用」整页数据）
 POST   /plugins/dsh-balance-monitor/config { display?, budget?, retention?, peakNotify?, priceSources?,
                                              officialPeak?, scanCredentialsFile?, deepseekKeyPrefixes?,
-                                             deepseekKeyMaxIndex?, deepseekKeys?, allowedHosts? }
+                                             deepseekKeyMaxIndex?, deepseekKeys?, allowedHosts?, ui? }
                                                            → 白名单写入并回传新指纹
 POST   /plugins/dsh-balance-monitor/balance/refresh { provider? } → 强制刷新官方余额（两条路线）
 GET    /plugins/dsh-balance-monitor/prices                 → 价目状态（来源/条数/更新时间）
@@ -410,7 +431,7 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 341 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 352 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（83 个用例）：官方峰谷（含未来切换点）、officialPeak 归一与假期回环校验、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
@@ -420,8 +441,8 @@ $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（41 �
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 账本损坏 + 手工喂假流验证记账（95 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（33 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（97 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（42 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -431,7 +452,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 341 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 352 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -463,7 +484,7 @@ lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
 lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
-test/*.mjs            九套用例，离线门槛 341 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 352 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -517,6 +538,17 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
     插件不替用户判断意图。
 16. **无 `sessionId` 的调用不去重**：宿主内部调用不一定带会话 id，那种情况一律放行（宁可多记一次
     也不漏账）。代价是「包装路由同一次调用到达两次」在这种调用上**可能**被记两次 —— 两害相权取其轻。
+
+### 还差什么（对着 `dsh-cost-meter` v1.7.44）
+
+0.8.0 只做了 T1。下面是**已知没做**的部分，按当初定的档位排（想做什么随时说）：
+
+| 档 | 内容 | 备注 |
+|---|---|---|
+| T2 | 26 周每日用量热力图；按模型统计（今日 / 全部历史双档 + 费用/Token/命中率/每美元 token 四种排行）；峰谷切换**弹窗提醒**增强（提前量 1–30 分钟 / 提醒类型 进峰·进谷·都要 / 位置 右下角·屏幕中心 / 一键预览）；侧栏「模型花费卡片」（Top-N、占比条、可选 Token、Top-1 角标、模型行数 1–10、卡片位置、默认周期） | 数据都已在账本 / `days.json` 里，主要是 UI 工作量 |
+| T3 | 「本会话费用」（输入区下方 / 会话标题栏实时费用，含缓存命中率与「包含子代理」开关）；输入框上方**额度横条**（预算 / 各窗口 chips）；右下角角标 | 需要新槽位与会话级数据通路（新增 `/session` 路由） |
+| T4 | 历史数据管理：导入安装前历史 / 清除全部历史 | **与「入账即固化、不回放重定价」冲突**：要么改成允许回放重定价（历史金额会随改价变），要么只做「不回放」版本（旧记录只补 token 与调用次数，金额留空 = 未定价） |
+| 不做 | 第三方额度体系（11 家 Coding Plan 查询、自定义 Provider 余额端点、OpenCode Go 额度、外部用量快照、Token Plan 用量统计） | 要引入 Cookie / AK-SK 签名等新凭据面，安全边界与本插件现在不同 |
 
 ---
 
