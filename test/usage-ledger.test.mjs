@@ -9,6 +9,9 @@ import assert from 'node:assert/strict'
 import { makeCallRecord, resolveTier } from '../lib/pricing.js'
 import {
   DEFAULT_DISPLAY,
+  DEFAULT_RETENTION,
+  LEDGER_KEEP_DAYS,
+  ROLLUP_KEEP_DAYS,
   addRecordToRollupDay,
   appendRecord,
   applyRollupDay,
@@ -20,6 +23,7 @@ import {
   dayKey,
   formatCountdown,
   normalizeLedger,
+  normalizeRetention,
   normalizeRollup,
   pruneLedger,
   pruneRollup,
@@ -286,6 +290,28 @@ test('pruneRollup 只留最近 N 天', () => {
   assert.equal(removed, 1, '只有 2026-01-01 落在 30 天窗口之外')
   assert.deepEqual(Object.keys(rollup.days).sort(), ['2026-09-01', '2026-09-10'])
 })
+console.log('\n[保留期 normalizeRetention：明细 / 日汇总]')
+test('两个键都能省；省了就是「没配」（undefined），交给默认值', () => {
+  assert.equal(normalizeRetention(undefined), undefined)
+  assert.equal(normalizeRetention(null), undefined)
+  assert.equal(normalizeRetention({}), undefined, '空对象 = 没配')
+  assert.equal(normalizeRetention([]), undefined)
+  assert.equal(normalizeRetention({ other: 1 }), undefined)
+})
+test('只给一个键：另一个补默认', () => {
+  assert.deepEqual(normalizeRetention({ ledgerDays: 30 }), { ledgerDays: 30, rollupDays: ROLLUP_KEEP_DAYS })
+  assert.deepEqual(normalizeRetention({ rollupDays: 90 }), { ledgerDays: LEDGER_KEEP_DAYS, rollupDays: 90 })
+})
+test('日汇总不会短于明细（否则「本月 / 累计」会静默缺天数）', () => {
+  assert.deepEqual(normalizeRetention({ ledgerDays: 60, rollupDays: 30 }), { ledgerDays: 60, rollupDays: 60 })
+})
+test('非法值回落默认；数字串也认；上限 3650；布尔不当数字用', () => {
+  assert.deepEqual(normalizeRetention({ ledgerDays: '14', rollupDays: '30.5' }), { ledgerDays: 14, rollupDays: ROLLUP_KEEP_DAYS })
+  assert.deepEqual(normalizeRetention({ ledgerDays: 0, rollupDays: -1 }), DEFAULT_RETENTION)
+  assert.deepEqual(normalizeRetention({ ledgerDays: 99999 }), DEFAULT_RETENTION)
+  assert.deepEqual(normalizeRetention({ ledgerDays: true }), DEFAULT_RETENTION)
+  assert.deepEqual(normalizeRetention({ ledgerDays: 3650, rollupDays: 3650 }), { ledgerDays: 3650, rollupDays: 3650 })
+})
 test('坏文件不会炸：normalizeRollup 丢垃圾、补缺省', () => {
   const rollup = normalizeRollup({ days: { '2026-09-10': { calls: '3', usd: '1.5' }, 'bad-key': { usd: 1 }, x: null } })
   assert.deepEqual(Object.keys(rollup.days), ['2026-09-10'])
@@ -477,6 +503,14 @@ test('峰谷相位 + 价目状态原样带进报表', () => {
   assert.equal(report.peak.inPeak, false)
   assert.equal(report.peak.countdown, '1 小时')
   assert.deepEqual(report.prices.sources, ['official', 'station', 'manual'])
+})
+test('报表带当前保留期（设置页「显示」分页拿它回填输入框）', () => {
+  const { ledger, rollup } = reportFixture()
+  assert.deepEqual(buildReport({ ledger, rollup, date: '2026-08-25' }).retention, DEFAULT_RETENTION, '没配就是默认 7 / 400')
+  assert.deepEqual(
+    buildReport({ ledger, rollup, date: '2026-08-25', retention: { ledgerDays: 30, rollupDays: 90 } }).retention,
+    { ledgerDays: 30, rollupDays: 90 },
+  )
 })
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)

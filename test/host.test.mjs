@@ -770,6 +770,30 @@ await test('POST /config：预算额度传空串 = 清除额度（不是 0）', 
   return 'amount=null'
 })
 
+await test('POST /config：保留期落盘并经报表回传', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 30, rollupDays: 90 } })
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json).slice(0, 200))
+  assert.deepEqual(res.json.data.retention, { ledgerDays: 30, rollupDays: 90 })
+  assert.equal(res.json.data.pruned, undefined, '没裁掉东西就不许谎报 pruned')
+  const state = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
+  assert.deepEqual(state.retention, { ledgerDays: 30, rollupDays: 90 }, '保留期要落盘')
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.deepEqual(report.retention, { ledgerDays: 30, rollupDays: 90 }, '报表要带当前保留期（设置页回填用）')
+  return '30 / 90'
+})
+
+await test('POST /config：保留期非法值回落默认、日汇总不短于明细、空对象 = 清掉', async () => {
+  const bumped = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 60, rollupDays: 30 } })
+  assert.deepEqual(bumped.json.data.retention, { ledgerDays: 60, rollupDays: 60 }, '日汇总应被抬到明细长度')
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: { ledgerDays: 'abc', rollupDays: 1e9 } })
+  assert.deepEqual(junk.json.data.retention, { ledgerDays: 7, rollupDays: 400 }, '非法值回落默认（7 / 400）')
+  const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { retention: {} })
+  assert.deepEqual(cleared.json.data.retention, { ledgerDays: 7, rollupDays: 400 })
+  const state = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
+  assert.equal(state.retention, undefined, '空对象 = 没配，不该在文件里留一条')
+  return '60/60 · 默认 7/400 · 已清空'
+})
+
 await test('配置重载后预算额度仍是 null（loadStore 不能被 Number(null)=0 骗）', async () => {
   // 重新 apply 一次 = 从磁盘重新读配置（同一份 settings 桩）
   mod.apply(makeCtx({ providers, settings }))
@@ -777,6 +801,20 @@ await test('配置重载后预算额度仍是 null（loadStore 不能被 Number(
   assert.equal(report.budget.amount, null, '重载后额度不该变成 0')
   assert.equal(report.budget.enabled, true, '开关状态要保持')
   return 'amount 仍为 null'
+})
+
+await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
+  // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const state = JSON.parse(readFileSync(file, 'utf8'))
+  state.retention = { ledgerDays: 12, rollupDays: 365 }
+  writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  mod.apply(makeCtx({ providers, settings }))
+  const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.deepEqual(report.retention, { ledgerDays: 12, rollupDays: 365 }, '重载后应认这份保留期')
+  // 清掉，别给后面的用例留状态
+  await call('POST', '/plugins/dsh-balance-monitor/config', { retention: null })
+  return '12 / 365'
 })
 
 await test('POST /balance/refresh：官方余额接口可用时把金额带回来', async () => {

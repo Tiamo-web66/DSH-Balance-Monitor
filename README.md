@@ -70,10 +70,11 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存 |
+| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存 |
 
-**本月 / 累计为什么不靠账本**：账本只留最近 7 天原始记录（供会话明细），所以另有
-`storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），保留 400 天。
+**本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
+`storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
+两个天数都能在设置页「显示 → 账本保留」里改（见第四节 `retention`）。
 报表里的「今日」仍以账本为准，两者相减避免重复计数。
 
 **改配置会发生什么**：`display` / `budget` / `priceSources` 都是白名单写入 `state.json`；
@@ -201,9 +202,9 @@ POST /plugins/dsh-balance-monitor/vision/apply { provider? }    ← 省略 provi
 本插件自己持久化的只有两件事（「类型」和「自动补图片」开关）：
 
 ```
-$DSH_HOME/storages/dsh-balance-monitor/state.json     ← 类型 / 自动补图片 / 展示币种 / 价表覆盖
-$DSH_HOME/storages/dsh-balance-monitor/ledger.json    ← 调用账本（按天，含依据指纹；保留 7 天）
-$DSH_HOME/storages/dsh-balance-monitor/days.json      ← 日汇总（本月/累计用；保留 400 天，覆盖式写入）
+$DSH_HOME/storages/dsh-balance-monitor/state.json     ← 类型 / 自动补图片 / 展示币种 / 保留期 / 价表覆盖
+$DSH_HOME/storages/dsh-balance-monitor/ledger.json    ← 调用账本（按天，含依据指纹；默认保留 7 天）
+$DSH_HOME/storages/dsh-balance-monitor/days.json      ← 日汇总（本月/累计用；默认保留 400 天，覆盖式写入）
 $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（点「更新价格表」后写入）
 ```
 
@@ -216,6 +217,7 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   "autoImage": { "pojia-gpt": false },
   "display": { "currency": "CNY", "symbol": "¥", "decimals": 4, "exchangeRate": 7.2 },
   "budget": { "enabled": false, "amount": null, "period": "month" },
+  "retention": { "ledgerDays": 7, "rollupDays": 400 },
   "priceSources": ["official", "station", "manual"],
   "priceTable": { "models": { }, "providers": { }, "aliases": { } }
 }
@@ -223,6 +225,9 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 
 - `display`：金额展示币种（账本恒以美元存；CNY 时按 `exchangeRate` 乘回，与参照实现同名的四个字段）。
 - `budget`：预算额度 + 周期（`today` / `month` / `all`），设置页「概览」可改。
+- `retention`：两份文件的保留天数（`ledgerDays` 账本明细 / `rollupDays` 日汇总），设置页「显示」可改；
+  两者都能省，允许 `1 – 3650`，且**日汇总不会短于明细**（不合法就各自回落默认）。
+  调小**立刻**裁掉超期数据（`POST /config` 时同步裁剪并落盘），调大只影响之后的留存。
 - `priceSources`：允许参与计价的来源等级（第八节）；不写就是 `official + station + manual`。
 - `priceTable`：整段覆盖默认价表（默认表见第八节）；不写就用随包的默认表（官方快照 + 站方快照）。
 - `ledger.json` / `days.json` / `prices.json`：账本 / 日汇总 / 站方价目；账本**只加总不重算**。
@@ -293,18 +298,18 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 265 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 275 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（62 个用例）：官方峰谷、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
-$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（35 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、预算占比、三级金额不重复计数
+$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（40 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（31 个用例）
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（68 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（17 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（71 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（19 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -314,8 +319,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 265 个用例才是唯一稳定的回归门槛。
-
+所以**别把 `npm test` 换成联网版**：离线 275 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -346,7 +350,7 @@ lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名�
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices）
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
-test/*.mjs            九套用例，离线门槛 265 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 275 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -377,16 +381,14 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 
 ### 未做（能补，还没补）
 
-9. **历史保留期是硬编码常量**：账本明细 7 天（`lib/usage-ledger.js:15` 的 `LEDGER_KEEP_DAYS`）、
-   日汇总 400 天（同文件 `ROLLUP_KEEP_DAYS`）。两者已是纯函数参数，**接设置项即可**，只是还没接。
-10. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
+9. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
    **没有跨进程文件锁**。同一台机器跑两个宿主实例同时记账，理论上会互相覆盖。
-11. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
+10. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
     （接错 API 会把整张卡片打崩，所以先用防御式探测）。
-12. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
+11. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
     自动补全的触发点是「设置 → 模型」页面渲染出本插件的卡片（也就是 `/state` 被访问）——
     不开这个页面时不会后台定时扫。写盘失败会进入 30s 冷却，不会每次请求都撞同一堵墙。
-13. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
+12. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
 
 ---
 

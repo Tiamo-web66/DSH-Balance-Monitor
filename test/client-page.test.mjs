@@ -68,6 +68,8 @@ const REPORT = {
   date: '2026-10-13',
   now: Date.parse('2026-10-13T02:00:00Z'),
   display: { currency: 'CNY', symbol: '¥', decimals: 4, exchangeRate: 7.2 },
+  // 刻意不等于客户端兜底的 7 / 400：这样「回填的是宿主送来的值」才可断言
+  retention: { ledgerDays: 12, rollupDays: 365 },
   totals: {
     today: { usd: 0.1944, amount: 1.3997, calls: 160, priced: 159, unpriced: 1, tokens: { input: 905_000, output: 161_000, cacheRead: 64_400_000, cacheWrite: 0, reasoning: 0, total: 65_466_000 }, hitRate: 0.986 },
     month: { usd: 55.3059, amount: 398.2025, calls: 14_285, unpriced: 623, days: 12, since: '2026-10-01', tokens: { input: 27_600_000, output: 10_100_000, cacheRead: 3_431_000_000, cacheWrite: 0, reasoning: 0, total: 3_468_700_000 }, hitRate: 0.992 },
@@ -420,6 +422,16 @@ test('切到「显示」页：币种/符号/小数位/汇率', () => {
   }
   return '四个字段都在'
 })
+test('「显示」页也带账本保留：明细 / 日汇总 + 独立保存按钮', () => {
+  const page = mount(CostPage)
+  const html = render(page)
+  for (const needle of ['账本保留', '账本明细（天）', '日汇总（天）', '保存保留期']) {
+    assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
+  }
+  // 输入框的值在 props 上（renderNode 只吐文本），而只读 walk 里组件拿不到 report 数据，
+  // 所以「回填宿主的值」由下面的点击用例断言提交出去的 payload（12 / 365 ≠ 兜底的 7 / 400）。
+  return '四个控件都在'
+})
 
 console.log('\n[交互：按钮真的打到宿主路由]')
 await (async () => {
@@ -439,6 +451,21 @@ await (async () => {
     const reportCalls = calls.filter(call => call.path.endsWith('/report')).length
     assert.ok(reportCalls >= 1 && reportCalls <= 4, `/report 请求次数异常：${reportCalls}`)
     return `/report ×${reportCalls}`
+  })
+  // 切到「显示」页，点保留期那个独立按钮
+  clickText(mount(CostPage), '显示')
+  const retentionClicked = clickText(mount(CostPage), '保存保留期')
+  await tick()
+  await tick()
+  test('点「保存保留期」→ POST /config 带 retention（且不带 display）', () => {
+    assert.ok(retentionClicked, '没找到「保存保留期」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    assert.ok(hit !== undefined, `没有发出 /config 请求，实际请求：${calls.map(c => c.path.split('/').pop()).join(',')}`)
+    assert.equal(hit.method, 'POST')
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.retention, { ledgerDays: 12, rollupDays: 365 }, `实际提交：${hit.body}（若是 7 / 400 说明没回填宿主的值）`)
+    assert.equal(body.display, undefined, '保留期不该顺手把展示设置也提交一遍')
+    return 'POST /config { retention }'
   })
 })()
 
