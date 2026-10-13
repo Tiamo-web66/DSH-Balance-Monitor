@@ -90,6 +90,11 @@ const React = {
 const cleanups = []
 
 // ── 浏览器环境替身 ──
+/** 26 周（182 天）的日期序列，末项是夹具里的「今天」；热力图按它铺格子。 */
+const HEAT_DATES = Array.from({ length: 182 }, (_, index) => {
+  const ms = Date.parse('2026-10-13T00:00:00Z') - (181 - index) * 86_400_000
+  return new Date(ms).toISOString().slice(0, 10)
+})
 const REPORT = {
   date: '2026-10-13',
   now: Date.parse('2026-10-13T02:00:00Z'),
@@ -153,6 +158,26 @@ const REPORT = {
     basisId: 'p1-03cb848a',
   },
   trend: [{ date: '2026-10-11', usd: 1.2, calls: 10, amount: 8.64 }, { date: '2026-10-12', usd: 2.4, calls: 20, amount: 17.28 }, { date: '2026-10-13', usd: 0.1944, calls: 160, amount: 1.3997 }],
+  // 26 周热力图：宿主侧补齐空天（182 项，末项 = 今天），这里照同一约定造数据
+  heatmap: HEAT_DATES.map((date, index) => ({
+    date,
+    calls: index === 181 ? 160 : (index >= 178 ? 4 : 0),
+    usd: index === 181 ? 0.1944 : (index >= 178 ? 0.01 : 0),
+    amount: index === 181 ? 1.3997 : (index >= 178 ? 0.072 : 0),
+    tokens: index === 181 ? 65_466_000 : (index >= 178 ? 1_000 : 0),
+  })),
+  // 全历史「按模型」：三种排行取向不同（金额 / token 数 / 命中率 / 每美元 token）
+  modelsHistory: {
+    since: '2026-08-25',
+    days: 3,
+    daysMissingModels: 1,
+    total: 3,
+    rows: [
+      { key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 900, priced: 900, unpriced: 0, days: 2, usd: 12.5, amount: 90, tokens: { input: 9_000_000, output: 1_000_000, cacheRead: 30_000_000, cacheWrite: 0, reasoning: 0, total: 40_000_000 }, hitRate: 0.769, perUsd: 3_200_000 },
+      { key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 300, priced: 298, unpriced: 2, days: 2, usd: 30, amount: 216, tokens: { input: 4_000_000, output: 2_000_000, cacheRead: 1_000_000, cacheWrite: 0, reasoning: 0, total: 7_000_000 }, hitRate: 0.2, perUsd: 233_333 },
+      { key: 'nanshan:grok-4', provider: 'nanshan', model: 'grok-4', calls: 50, priced: 50, unpriced: 0, days: 1, usd: 1, amount: 7.2, tokens: { input: 500_000, output: 0, cacheRead: 4_500_000, cacheWrite: 0, reasoning: 0, total: 5_000_000 }, hitRate: 0.9, perUsd: 5_000_000 },
+    ],
+  },
   basisIds: ['p1-03cb848a'],
 }
 
@@ -301,6 +326,19 @@ function mount(component, props = {}, visit = null) {
     if (!dirty) return tree
   }
   return null
+}
+
+/** 文案包含匹配的点击（按钮文案常带后缀/括号，用精确匹配太脆）。 */
+function clickMatch(component, needle) {
+  let clicked = false
+  mount(component, {}, node => {
+    if (clicked) return
+    if (node.type !== 'button') return
+    if (!render(node.props?.children).includes(needle)) return
+    node.props?.onClick?.()
+    clicked = true
+  })
+  return clicked
 }
 
 /** 状态化地展开一遍并点击第一个匹配的元素（用来验证「点了界面真的变」）。 */
@@ -465,14 +503,73 @@ test('切到「额度」页：供应商 / 类型 / 倍率 / 峰谷 / 备注', ()
   }
   return '额度行含倍数与余额'
 })
-test('切到「用量」页：token 汇总 + 近 N 天柱状 + 按模型', () => {
+test('切到「用量」页：token 汇总 + 26 周热力图 + 按模型统计入口', () => {
   assert.ok(clickText(tree, '用量'))
   tree = mount(CostPage)
   const html = render(tree)
-  for (const needle of ['缓存写入', '推理', '最近 3 天', '今日按模型', 'cn:deepseek-v4.1-flash']) {
+  for (const needle of ['缓存写入', '推理', '最近 3 天', 'Token 用量统计', '近 26 周', '按模型统计', 'cn:deepseek-v4.1-flash']) {
     assert.ok(html.includes(needle), `用量页缺少「${needle}」`)
   }
-  return '三段内容齐全'
+  return '四段内容齐全'
+})
+test('按模型统计：默认展开，可折叠，双档 + 四种排行真的按指标重排', () => {
+  assert.ok(render(mount(CostPage)).includes('按模型统计'), '入口应在')
+  assert.ok(render(mount(CostPage)).includes('全部历史'), '默认应展开（隐藏入口等于没有）')
+  // 按钮是开关：折叠 → 内容收起 → 再展开
+  assert.ok(clickMatch(CostPage, '按模型统计'), '应能折叠')
+  assert.ok(!render(mount(CostPage)).includes('全部历史'), '折叠后内容应收起')
+  assert.ok(clickMatch(CostPage, '按模型统计'), '应能再展开')
+  const opened = mount(CostPage)
+  const openedHtml = render(opened)
+  for (const needle of ['今日', '全部历史', '费用', 'Token', '命中率', '每美元 token']) {
+    assert.ok(openedHtml.includes(needle), `按模型统计缺少「${needle}」`)
+  }
+  // 切到「全部历史」：范围说明 + 0.8.0 之前的缺口如实报出来
+  assert.ok(clickText(opened, '全部历史'))
+  const historyHtml = render(mount(CostPage))
+  for (const needle of ['2026-08-25 起', '3 天有记录', '3 个模型', '0.8.0 之前写入的', '1 天']) {
+    assert.ok(historyHtml.includes(needle), `全历史档缺少「${needle}」：${historyHtml.slice(-400)}`)
+  }
+  // 行的先后顺序 = 排行顺序（名字只会出现在排行行里，所以拿 indexOf 比先后是可靠的）
+  const order = () => {
+    const html = render(mount(CostPage))
+    return ['cn:deepseek-v4.1-flash', 'cn:deepseek-v4.1-pro', 'grok-4'].sort((a, b) => html.indexOf(a) - html.indexOf(b))
+  }
+  // 默认按费用：pro 30 > flash 12.5 > grok-4 1
+  assert.deepEqual(order(), ['cn:deepseek-v4.1-pro', 'cn:deepseek-v4.1-flash', 'grok-4'], '默认按费用降序')
+  // 按 Token：flash 40M > pro 7M > grok-4 5M（与费用档不同，说明真的重排了）
+  assert.ok(clickText(mount(CostPage), 'Token'))
+  assert.deepEqual(order(), ['cn:deepseek-v4.1-flash', 'cn:deepseek-v4.1-pro', 'grok-4'], '按 token 降序')
+  // 按命中率：grok-4 90% > flash 76.9% > pro 20%
+  assert.ok(clickText(mount(CostPage), '命中率'))
+  assert.deepEqual(order(), ['grok-4', 'cn:deepseek-v4.1-flash', 'cn:deepseek-v4.1-pro'], '按命中率降序')
+  assert.ok(render(mount(CostPage)).includes('90.0%'), '命中率列给百分比')
+  // 按每美元 token：grok-4 5M > flash 3.2M > pro 0.23M
+  assert.ok(clickText(mount(CostPage), '每美元 token'))
+  assert.deepEqual(order(), ['grok-4', 'cn:deepseek-v4.1-flash', 'cn:deepseek-v4.1-pro'], '按每美元 token 降序')
+  assert.ok(render(mount(CostPage)).includes(' / $'), '每美元 token 列带单位')
+  // 未定价条数也要露出来（pro 有 2 次未定价）
+  assert.ok(render(mount(CostPage)).includes('2 次未定价'), '未定价条数应显示')
+  return '双档 + 四种排行 + 缺口提示'
+})
+test('热力图：26 周 = 182 个格子，且首格对齐到首日的星期（补位格不带日期）', () => {
+  const page = mount(CostPage)
+  // 只认热力图格子（12×12 的小方块）：柱状图的 title 也是「日期 · …」，别把它算进来
+  const cells = []
+  walk(page, node => {
+    const style = node.props?.style ?? {}
+    if (style.width === 12 && style.height === 12) cells.push(node)
+  })
+  const dated = cells.filter(node => typeof node.props?.title === 'string' && /^\d{4}-\d{2}-\d{2} · /.test(node.props.title))
+  assert.equal(dated.length, 182, `应有 182 天的格子，实际 ${dated.length}`)
+  assert.ok(String(dated[0].props.title).startsWith(HEAT_DATES[0]), `首格应是 ${HEAT_DATES[0]}，实际 ${dated[0].props.title}`)
+  assert.ok(String(dated.at(-1).props.title).startsWith('2026-10-13'), '末格是今天')
+  assert.ok(String(dated.at(-1).props.title).includes('65.5M'), `悬停应给当天 token：${dated.at(-1).props.title}`)
+  // 补位格（首日之前的几天）没有 date/title，但确实占位 —— 否则「行 = 星期」会整体错位
+  const firstWeekday = new Date(Date.parse(`${HEAT_DATES[0]}T00:00:00Z`)).getUTCDay()
+  const padding = cells.filter(node => node.props?.title === undefined)
+  assert.equal(padding.length, firstWeekday, `补位格数应等于首日的星期序号（${firstWeekday}），实际 ${padding.length}`)
+  return `182 格 · 补位 ${firstWeekday}`
 })
 test('切到「价格」页：来源分级 + 允许等级 + 更新按钮 + 出处', () => {
   assert.ok(clickText(tree, '价格'))
