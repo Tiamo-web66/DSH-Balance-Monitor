@@ -15,6 +15,7 @@ import {
   addRecordToRollupDay,
   appendRecord,
   applyRollupDay,
+  buildModelCard,
   buildReport,
   buildSidebarData,
   createLedger,
@@ -26,15 +27,15 @@ import {
   normalizeRetention,
   normalizeRollup,
   pruneLedger,
+  pruneRollup,
   rollupDailySeries,
   rollupDaysMissingModels,
-  summarizeDayModels,
-  summarizeRollupModels,
-  summarizeSession,
-  pruneRollup,
   summarizeDay,
+  summarizeDayModels,
   summarizeModels,
   summarizeRollup,
+  summarizeRollupModels,
+  summarizeSession,
   summarizeSessions,
   toDisplay,
 } from '../lib/usage-ledger.js'
@@ -672,5 +673,7 @@ test('报表带当前保留期（设置页「显示」分页拿它回填输入�
   )
 })
 
-console.log(`\n${passed} 通过 / ${failed} 失败`)
+
+console.log(`
+${passed} 通过 / ${failed} 失败`)
 process.exit(failed === 0 ? 0 : 1)

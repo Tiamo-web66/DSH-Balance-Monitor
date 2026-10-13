@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "test": "npm run test:offline",
-    "test:offline": "node test/pricing.test.mjs && node test/litellm-prices.test.mjs && node test/credentials-refs.test.mjs && node test/usage-ledger.test.mjs && node test/balance.test.mjs && node test/sub2api.test.mjs --offline && node test/vision.test.mjs && node test/host.test.mjs && node test/client-page.test.mjs",
+    "test:offline": "node test/pricing.test.mjs && node test/litellm-prices.test.mjs && node test/credentials-refs.test.mjs && node test/usage-ledger.test.mjs && node test/balance.test.mjs && node test/sub2api.test.mjs --offline && node test/vision.test.mjs && node test/timezone.test.mjs && node test/host.test.mjs && node test/client-page.test.mjs",
     "test:net": "node test/sub2api.test.mjs",
     "test:net:lenient": "node test/sub2api.test.mjs --allow-unreachable",
     "test:all": "npm run test:offline && npm run test:net"
