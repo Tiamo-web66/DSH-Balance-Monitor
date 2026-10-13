@@ -1166,6 +1166,24 @@ await test('模型花费卡片：配置是局部补丁，侧栏按配置下发 T
   return '局部补丁 · Top-N + 份额 · 关闭即 null'
 })
 
+await test('侧栏也带预算进度（横条那格），与设置页概览同一套规则', async () => {
+  await call('POST', '/plugins/dsh-balance-monitor/config', { budget: { enabled: true, amount: 1000, period: 'month' } })
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(sidebar.budget.enabled, true)
+  assert.equal(sidebar.budget.period, 'month')
+  assert.equal(sidebar.budget.amount, 1000)
+  assert.ok(sidebar.budget.usedAmount > 0, `已用金额要有：${JSON.stringify(sidebar.budget)}`)
+  // 与设置页概览的占比必须一致（同一套规则，两处各算一份迟早会漂）
+  close(sidebar.budget.ratio, report.budget.ratio, 1e-9, '横条与概览的占比')
+  // 没设额度 → 占比是 null（不是 0）：界面据此不显示那一格
+  await call('POST', '/plugins/dsh-balance-monitor/config', { budget: { amount: null } })
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.budget.ratio, null)
+  // 未启用时界面也不显示
+  await call('POST', '/plugins/dsh-balance-monitor/config', { budget: { enabled: false } })
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.budget.enabled, false)
+  return '与概览同规则 · amount=null → ratio=null'
+})
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
   // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')

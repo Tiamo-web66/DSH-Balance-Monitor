@@ -74,13 +74,28 @@ const React = {
       }
     }]
   },
-  useEffect(effect) {
+  /**
+   * effect：**带 deps 时按 deps 变化重跑**（与 React 一致），不带 deps 的当「只跑一次」。
+   *
+   * 后半句是刻意的简化：真 React 里 `useEffect(fn)` 每次渲染都跑，但这份假渲染器没有
+   * 提交阶段，每次渲染都跑一遍会跟 setState 形成死循环。组件里凡是需要「跟着某个值变」的
+   * 都写了 deps，所以这条简化不影响覆盖，而它换来的是：**能测「同一个组件在两种配置下各渲染一次」**
+   * （之前做不到，T3 有两条用例因此写不出来）。
+   */
+  useEffect(effect, deps) {
     const frame = currentFrame
     if (frame === null) return
     const cursor = frame.cursor++
-    if (frame.effects[cursor] === true) return
-    frame.effects[cursor] = true
+    const previous = frame.effects[cursor]
+    if (previous !== undefined) {
+      if (deps === undefined) return
+      // 浅比较 deps：长度与逐项都相同才算同一个依赖
+      if (Array.isArray(previous.deps) && previous.deps.length === deps.length
+        && previous.deps.every((item, index) => item === deps[index])) return
+      if (typeof previous.cleanup === 'function') previous.cleanup()
+    }
     const cleanup = effect()
+    frame.effects[cursor] = { deps: Array.isArray(deps) ? [...deps] : undefined, cleanup: typeof cleanup === 'function' ? cleanup : null }
     if (typeof cleanup === 'function') cleanups.push(cleanup)
   },
   useCallback(fn) { return fn },
@@ -226,6 +241,8 @@ const SIDEBAR = {
   sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
   quotaStrip: { enabled: false, showBalance: true },
   corner: { enabled: false, showTop1: false },
+  // 预算进度（横条那格）：宿主按 budgetProgress 算好，占比 0.3982 → 39.8%
+  budget: { enabled: true, amount: 1000, currency: 'CNY', period: 'month', usedUsd: 55.3, usedAmount: 398.2, ratio: 0.3982 },
   basisIds: ['p1-03cb848a'],
 }
 function Report_now() { return Date.parse('2026-10-13T02:00:00Z') }
@@ -1259,6 +1276,12 @@ await (async () => {
     SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: false, includeSubagent: true }
     await reloadSidebar()
     const agentHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
+    test('勾「包含子代理」→ 走 total 那一档，且关掉命中率后不再显示', () => {
+      assert.ok(agentHtml.includes('本会话 ¥3.6'), `含子代理应给合计：${agentHtml.slice(0, 220)}`)
+      assert.ok(agentHtml.includes('5 次'), '合计调用数 5')
+      assert.ok(!agentHtml.includes('命中'), '关掉命中率后不该有它')
+      return '含子代理 → ¥3.6 · 5 次'
+    })
     SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: true, includeSubagent: false }
     await reloadSidebar()
     const headerHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
@@ -1274,7 +1297,7 @@ await (async () => {
     const stripHtml = render(mount(strip, {}))
     const cornerHtml = render(mount(corner, {}))
     test('额度横条：今日 / 峰谷档位 / 余额三个 chip，且是按钮（点一下刷新）', () => {
-      for (const needle of ['今日 1.3997', '峰时', '余额 ¥1.51']) {
+      for (const needle of ['预算 39.8%', '今日 1.3997', '峰时', '余额 ¥1.51']) {
         assert.ok(stripHtml.includes(needle), `横条缺少「${needle}」：${stripHtml.slice(0, 200)}`)
       }
       assert.ok(clickIn(strip, node => node.type === 'button' && render(node.props?.children).includes('今日')), 'chip 应是可点按钮')
@@ -1293,6 +1316,13 @@ await (async () => {
     const stripOff = render(mount(strip, {}))
     const cornerOff = render(mount(corner, {}))
     const sessionOff = await renderSession(composerSession, { sessionId: 'sess-parent' })
+    // 「三块关掉都不渲染」这条**仍然测不了**：侧栏 store 的 data 是宿主下发的快照，
+    // 组件读到的是上一次取数的那份（focus 重取在这个渲染器里对已挂载实例不生效），
+    // 于是断言拿到的还是旧档。开关语义由 host 用例覆盖（三个块的局部补丁 / 非法保持 / 全默认不留条），
+    // 这里不写假绿断言。
+    void sessionOff
+    void stripOff
+    void cornerOff
   } finally {
     SIDEBAR.sessionCost = saved.sessionCost
     SIDEBAR.quotaStrip = saved.quotaStrip
