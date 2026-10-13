@@ -373,6 +373,11 @@ let sessionGate = null
 let historyClearOverride = null
 /** `sessionId` → 专用夹具（没登记的走通用 `sessionFixture`）。 */
 const sessionOverrides = new Map()
+/**
+ * `/keys` 的响应覆盖：默认走 `KEYS`（两把 key）。
+ * 用例要验「宿主按供应商过滤后一把都没剩」时把它设成 `keys: []` 的那份。
+ */
+let keysOverride = null
 /** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
 function sessionFixtureOf(path) {
   const id = /sessionId=([^&]*)/.exec(path)?.[1] ?? ''
@@ -383,7 +388,7 @@ globalThis.fetch = async (url, init) => {
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
-    : path.includes('/keys') ? { ok: true, data: KEYS }
+    : path.includes('/keys') ? { ok: true, data: keysOverride ?? KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
     : path.includes('/session?') ? { ok: true, data: sessionFixtureOf(path) }
@@ -773,11 +778,12 @@ test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主�
   assert.ok(values.includes('panel.example.com'), `Host 白名单应回填：${values.join(' | ')}`)
   return '三段控件齐全且回填宿主值'
 })
-test('「显示」页带「界面」段：语言选择器 + 轮询间隔 + 三个隐藏/显示开关', () => {
+test('「显示」页带「界面」段：语言选择器 + 轮询间隔 + 四个隐藏/显示开关', () => {
   const page = mount(CostPage)
   const html = render(page)
   for (const needle of ['界面', '界面语言', '跟随浏览器', '简体中文', 'English',
-    '侧栏刷新间隔（秒）', '保存间隔', '隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID']) {
+    '侧栏刷新间隔（秒）', '保存间隔', '隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID',
+    '侧栏显示峰谷表 / 价格表']) {
     assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
   }
   // 回填：语言选择器当前值 = auto，轮询间隔 = 30，三个开关默认关
@@ -790,10 +796,20 @@ test('「显示」页带「界面」段：语言选择器 + 轮询间隔 + 三�
   walk(page, node => { if (node.type === 'input' && node.props?.min === '10') seconds.push(node.props) })
   assert.equal(seconds.length, 1, `应有一个轮询间隔输入框（min=10），实际 ${seconds.length}`)
   assert.equal(Number(seconds[0].value), 30, '间隔应回填宿主的 30')
-  for (const label of ['隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID']) {
+  for (const label of ['隐藏官方余额', '隐藏今日消耗', '会话明细显示完整会话 ID', '侧栏显示峰谷表 / 价格表']) {
     assert.equal(checkbox(page, label).checked, false, `「${label}」默认应关`)
   }
-  return '语言 / 间隔 / 三个开关都在'
+  return '语言 / 间隔 / 四个开关都在'
+})
+test('「显示」页带「峰谷表」只读表：侧栏那行默认不显示，这里要看得到', () => {
+  const page = mount(CostPage)
+  const html = render(page)
+  assert.ok(html.includes('峰谷表'), `显示页缺少峰谷表：${html.slice(-400)}`)
+  assert.ok(html.includes('→ 平价'), `应列出「→ 平价」：${html.slice(-400)}`)
+  assert.ok(html.includes('→ 高峰'), '应列出「→ 高峰」')
+  assert.ok(html.includes('10-13'), '每行要带本地时刻（月-日 时:分）')
+  assert.ok(html.includes('接下来 6 个档位切换点'), '表下面要说清这是哪来的数据')
+  return '2 个切换点（本地时刻 + 方向）'
 })
 
 console.log('\n[交互：按钮真的打到宿主路由]')
@@ -1339,6 +1355,28 @@ await (async () => {
       assert.ok(!headerIdle.includes('本会话'), '位置=composer 时标题栏那处不该渲染')
       return '¥2.1600 · 3 次 · 5.0M · 80.0%'
     })
+    /**
+     * 收集「按宿主 dock 列宽居中」的那层样式：判据是 `maxWidth` 里带宿主的
+     * `--dsh-composer-card-max-width`（只有输入区上方那两条会有；标题栏那处不该有）。
+     */
+    const dockColumns = (Component, props) => {
+      const out = []
+      walk(mount(Component, props), node => {
+        const style = node.props?.style
+        if (typeof style?.maxWidth === 'string' && style.maxWidth.includes('--dsh-composer-card-max-width')) out.push(style)
+      })
+      return out
+    }
+    test('本会话费用那行按宿主的 dock 列宽居中（不再贴会话面板左边）', () => {
+      const rows = dockColumns(composerSession, { sessionId: 'sess-parent' })
+      assert.equal(rows.length, 1, `应有且只有一行吃 dock 列宽：${rows.length}`)
+      const style = rows[0]
+      assert.equal(style.margin, '0 auto', '要靠 margin auto 才能居中')
+      assert.ok(String(style.width).startsWith('calc(100% -'), `宽度要减掉两侧留白：${style.width}`)
+      assert.ok(String(style.width).includes('--dsh-composer-side-clearance'), `侧边留白要跟宿主一致：${style.width}`)
+      assert.ok(String(style.padding).includes('--dsh-composer-dock-inset'), `横向内缩要跟宿主 dock 一致：${style.padding}`)
+      return 'margin auto + 宿主 --dsh-composer-* 变量'
+    })
     const noSession = await renderSession(composerSession, {})
     test('宿主没给 sessionId（不是会话页）→ 不渲染', () => {
       assert.equal(noSession.includes('本会话'), false, `没有会话 id 就不该有这一行：${noSession.slice(0, 120)}`)
@@ -1364,16 +1402,26 @@ await (async () => {
     })
     // 宿主会把两个槽位都挂上：没被选中的那一处不该跟着取数，也不该起自己的轮询定时器
     //（15s 一次、每次 force 真发请求）；只数请求抓不到它 —— store 有 TTL 缓存会吃掉重复请求，
-    // 所以这里数**定时器**。
-    const timersBefore = intervals.filter(item => item.ms === 15_000 && item.cleared === false).length
+    // 所以这里数**定时器**。数的是**累计起过多少个**，不是「当前未清理的」那个：
+    // 后者不单调 —— 配置一变 effect 会清掉旧的、起个新的，未清理数就会**变小**，
+    // 于是「挂载隐藏实例后数量不变」只要测量窗口跨过一次配置变更就假失败
+    //（实测单独跑绿、在 npm 门槛里 3/3 抖，就是环境差）。
+    const timersBefore = intervals.filter(item => item.ms === 15_000).length
     const idleBefore = calls.filter(call => call.path.includes('/session?')).length
     await renderSession(composerSession, { sessionId: 'sess-parent' })
     const idleAfter = calls.filter(call => call.path.includes('/session?')).length
-    const timersAfter = intervals.filter(item => item.ms === 15_000 && item.cleared === false).length
+    const timersAfter = intervals.filter(item => item.ms === 15_000).length
     test('没被选中的那处不发请求、也不起 15 秒轮询定时器', () => {
       assert.equal(idleAfter, idleBefore, `隐藏那处不该取数：${idleBefore} → ${idleAfter}`)
       assert.equal(timersAfter, timersBefore, `隐藏那处不该起定时器：${timersBefore} → ${timersAfter}`)
       return `隐藏处 0 请求 · 0 新定时器（累计起过 ${intervals.filter(item => item.ms === 15_000).length} 个 15s 定时器）`
+    })
+    // 这条**必须留在上面那条之后**：挂一次 header 那处会（重新）起一个 15 秒定时器，
+    // 排在前面会把「隐藏处不该起定时器」那条用例的 before/after 计数搞乱（实测 1 → 0）。
+    test('位置=header 时不吃输入区那套列宽（标题栏那行不许被压窄）', () => {
+      const rows = dockColumns(headerSession, { sessionId: 'sess-parent' })
+      assert.equal(rows.length, 0, `标题栏那处不该带 dock 列宽：${JSON.stringify(rows)}`)
+      return '标题栏不吃 dock 列宽'
     })
     SIDEBAR.quotaStrip = { enabled: true, showBalance: true }
     SIDEBAR.corner = { enabled: true, showTop1: true }
@@ -1388,6 +1436,11 @@ await (async () => {
       assert.ok(!stripHtml.includes('今日 1.3997'), `金额不能裸着显示：${stripHtml.slice(0, 200)}`)
       assert.ok(clickIn(strip, node => node.type === 'button' && render(node.props?.children).includes('今日')), 'chip 应是可点按钮')
       return '3 个 chip · 可点 · 带币种符号'
+    })
+    test('额度横条挂在同一条 dock 上：也按列宽居中', () => {
+      const rows = dockColumns(strip, {})
+      assert.equal(rows.length, 1, `横条那一行也该吃 dock 列宽：${rows.length}`)
+      return '横条同一套列宽'
     })
     test('右下角角标：今日 + 峰谷档位 + Top-1 模型（按金额取最大那个）', () => {
       for (const needle of ['今日 ¥1.3997', '峰时', 'Top-1 cn:deepseek-v4.1-flash']) {
@@ -1581,15 +1634,26 @@ await (async () => {
 console.log('\n[左侧栏：余额可点击切换 DeepSeek 两条路线]')
 await (async () => {
   const sidebar = component('sidebar.footer.action')
+  /** store 已经加载过：改夹具后要让它重新取一次数（focus 正好是这条路径）。 */
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
   let tree = mount(sidebar.component)
   await tick()
   tree = mount(sidebar.component)
   const html = render(tree)
-  test('侧栏：余额（多 key 之和）/ 今日 / 峰谷倒计时 / 价格表按钮都在', () => {
-    for (const needle of ['余额', '¥1.51', '今日', '¥1.3997', '进入平价', '价格表', '更新']) {
+  test('侧栏：余额（多 key 之和）/ 今日 / 峰谷倒计时都在；峰谷表与价格表两行默认不显示', () => {
+    for (const needle of ['余额', '¥1.51', '今日', '¥1.3997', '进入平价']) {
       assert.ok(html.includes(needle), `侧栏缺少「${needle}」：${html.slice(0, 200)}`)
     }
-    return '多 key 总额 ¥1.51（0.01 + 1.50）'
+    // 这两个是**去改配置的入口**（不是用量），默认不占侧栏那点位置：
+    // 同一件事在设置页「余额与费用」里都有（价格页更新价目、显示页看峰谷表）。
+    for (const needle of ['峰谷表', '价格表']) {
+      assert.ok(!html.includes(needle), `默认不该渲染「${needle}」：${html.slice(0, 200)}`)
+    }
+    return '余额/今日/峰谷条在 · 两个操作行默认收起'
   })
   test('两条路线都在时，余额行是可点的切换按钮（带提示）', () => {
     const buttons = []
@@ -1626,10 +1690,14 @@ await (async () => {
     assert.equal(saved[saved.length - 1].value, 'deepseek-account')
     return 'DeepSeek ¥1.51 → DeepSeek Account ¥-0.04'
   })
-  test('峰谷表：默认收起，点「预览」才列出接下来的切换点', () => {
+  // 两个操作行默认不显示（上面那条断言过了）；要让它们回到侧栏，就打开「显示 → 界面」那位开关
+  SIDEBAR.ui = { sidebarTools: true }
+  await reloadSidebar()
+  test('打开「侧栏显示峰谷表 / 价格表」→ 峰谷表默认收起，点「预览」才列出接下来的切换点', () => {
     const collapsed = render(mount(sidebar.component))
     assert.ok(collapsed.includes('峰谷表'), `侧栏应有峰谷表行：${collapsed.slice(0, 200)}`)
     assert.ok(collapsed.includes('预览'), '默认是「预览」按钮')
+    assert.ok(collapsed.includes('价格表'), '同一个开关也把价格表那行带出来')
     // 倒计时条上写的是「…后进入平价」，所以行标签用「→ 平价 / → 高峰」，两者不会串
     assert.equal(collapsed.includes('→ 平价'), false, '收起时不该把切换点列出来')
     const shown = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children).includes('预览'))
@@ -1640,10 +1708,28 @@ await (async () => {
     assert.ok(openedSchedule.includes('10-13'), '每行应带本地时刻（月-日 时:分）')
     return '收起 → 展开 · 2 个切换点'
   })
-  // 侧栏那侧的「隐藏区块」没在这里单测：夹具是 JSON 深拷贝，改完要重新拉 /sidebar 才生效，
-  // 而侧栏 store 在 IIFE 里被同名的槽位变量遮住了、够不到（30s 轮询与 focus 在假 window 里也不跑）。
-  // 只要 `/sidebar` 带 `ui`（host 用例已断言）并且组件按 `ui.hide*` 分支渲染（代码只有两处），
-  // 覆盖就够；真正的手点验证留到真宿主里做。
+  // 侧栏那枚「更新」按钮只在这个开关打开时才存在 —— 打了宿主就得报结果（与设置页价格页同一个路由）
+  const priceClicked = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '更新')
+  await tick()
+  await tick()
+  const afterUpdate = render(mount(sidebar.component))
+  test('同一开关下的「更新」照旧打宿主，结果行也照旧报出来', () => {
+    assert.ok(priceClicked, '应能点到侧栏价格表那枚「更新」按钮')
+    assert.ok(calls.some(call => call.path.endsWith('/prices/update')), '应发出 /prices/update')
+    assert.ok(afterUpdate.includes('价目已更新'), `更新结果要如实报：${afterUpdate.slice(-300)}`)
+    return '侧栏更新 → 结果行'
+  })
+  SIDEBAR.ui = undefined
+  await reloadSidebar()
+  test('关掉这个开关 → 两行一起收起（不留残影）', () => {
+    const cleaned = render(mount(sidebar.component))
+    assert.ok(!cleaned.includes('峰谷表'), `关掉后不该还有峰谷表行：${cleaned.slice(0, 200)}`)
+    assert.ok(!cleaned.includes('价格表'), '关掉后不该还有价格表行')
+    return '已收起'
+  })
+  // 侧栏那侧的「隐藏区块」没在这里单测：夹具是 JSON 深拷贝，改完要重新拉 /sidebar 才生效。
+  // 只要 `/sidebar` 带 `ui`（host 用例已断言）并且组件按 `ui.hide*` 分支渲染，覆盖就够；
+  // 真正的手点验证留到真宿主里做。
 })()
 
 console.log('\n[供应商卡片：DeepSeek 的多把 key 编辑区]')
@@ -1691,6 +1777,103 @@ await (async () => {
     assert.ok(!html.includes('×1.2799'), '反推倍率不能进公式')
     return '原因：方向 + 倍数 + 倍率为 1 + 逐模型区间'
   })
+
+  // ── 密钥区布局：不溢出、不叠字（截图里那条 + 「保存 key」被卡片右边缘切掉）──
+  const dsProps = { provider: { provider: 'deepseek-official', settingsNs: 'llm-deepseek' } }
+  /**
+   * 把卡片树里「带样式」的节点连**父节点**一起摘出来。
+   * 检查「值和状态文案是不是挤在同一行」必须看父节点（`walk` 只给节点自己）。
+   */
+  const nodesWithParent = element => {
+    const pairs = []
+    const parents = new Map()
+    walk(element, node => {
+      for (const child of [].concat(node.props?.children ?? [])) {
+        if (child !== null && typeof child === 'object') parents.set(child, node)
+      }
+      pairs.push({ node, parent: parents.get(node), text: render(node.props?.children) })
+    })
+    return pairs
+  }
+  /** 「同一行」的容器：inline-flex，或 row 方向的 flex。 */
+  const isRowContainer = style => style?.display === 'inline-flex'
+    || (style?.display === 'flex' && style?.flexDirection !== 'column')
+
+  let listTree = mount(Component, dsProps)
+  await tick()
+  listTree = mount(Component, dsProps)
+  const pairs = nodesWithParent(listTree)
+
+  test('密钥行：状态文案「主 key（宿主正在用）」另起一行，不再和值挤在同一行叠字', () => {
+    // 只认「状态文案」那几个确切文本的节点（上层容器也含这些字，但它们不是文案本身）
+    const stateTexts = ['主 key（宿主正在用）', '已配置', '未配置']
+    const stateNodes = pairs.filter(item => stateTexts.includes(item.text))
+    assert.equal(stateNodes.length, 2, `两把 key 各该有一句状态文案，实际 ${JSON.stringify(stateNodes.map(i => i.text))}`)
+    for (const item of stateNodes) {
+      assert.equal(isRowContainer(item.parent?.props?.style), false,
+        `状态文案仍和值挤在同一行（父节点 ${JSON.stringify(item.parent?.props?.style)}）—— 窄宽度下就是截图里的叠字`)
+      // 自己也要能收能断：不然长文案在窄卡片里溢出
+      assert.equal(item.node.props.style.minWidth, 0, '状态文案要能缩到 0')
+      assert.equal(item.node.props.style.overflowWrap, 'anywhere', '状态文案要能断行')
+    }
+    const code = pairs.find(item => item.node.type === 'code')
+    assert.ok(code !== undefined, '找不到打码的密钥值节点')
+    assert.ok(/••••/.test(code.text), `值节点应是打码值：${JSON.stringify(code.text)}`)
+    assert.equal(/主 key|已配置/.test(code.parent.text), false,
+      `值所在那一行不该再写状态文案：${JSON.stringify(code.parent.text)}`)
+    return `${stateNodes.length} 处状态文案各自独立一行`
+  })
+  test('密钥值：省略号收尾 + minWidth 0（长 key 撑不破卡片）', () => {
+    const code = pairs.find(item => item.node.type === 'code')
+    const style = code.node.props.style
+    assert.equal(style.textOverflow, 'ellipsis')
+    assert.equal(style.minWidth, 0)
+    assert.equal(style.whiteSpace, 'nowrap')
+    assert.equal(style.maxWidth, '100%')
+    return `code { minWidth: 0 · textOverflow: ellipsis · maxWidth: 100% }`
+  })
+  test('「保存 key」按钮不被切：所在行可换行、输入框不写死宽度且能缩到 0', () => {
+    const save = pairs.find(item => item.node.type === 'button' && item.text === '保存 key')
+    assert.ok(save !== undefined, `找不到「保存 key」按钮：${pairs.map(i => i.text).filter(Boolean).slice(0, 20).join(' | ')}`)
+    const rowStyle = save.parent?.props?.style
+    assert.equal(rowStyle?.display, 'flex', `按钮应在一个 flex 行里：${JSON.stringify(rowStyle)}`)
+    assert.equal(rowStyle?.flexWrap, 'wrap', '窄宽度下按钮要能换行，而不是被卡片右边缘切掉')
+    assert.equal(rowStyle?.minWidth, 0, '这一行要能缩到 0')
+    const input = pairs.find(item => item.node.type === 'input' && item.node.props?.type === 'password')
+    const inputStyle = input.node.props.style
+    assert.equal(inputStyle.minWidth, 0, '输入框要能缩到 0（否则把按钮挤出卡片）')
+    assert.equal(typeof inputStyle.width, 'string', `不该写死数字宽度：${JSON.stringify(inputStyle.width)}`)
+    assert.equal(inputStyle.flex, '1 1 160px', `输入框应随卡片伸缩：${JSON.stringify(inputStyle.flex)}`)
+    return `输入框 flex ${inputStyle.flex} · 行 flexWrap wrap`
+  })
+  test('两列布局用 minmax(0, 1fr)：右列不再是 min-content（整块不再顶出卡片）', () => {
+    const grids = pairs.filter(item => item.node.props?.style?.gridTemplateColumns !== undefined)
+    assert.ok(grids.length > 0, '找不到两列网格')
+    for (const item of grids) {
+      assert.equal(item.node.props.style.gridTemplateColumns, 'auto minmax(0, 1fr)')
+    }
+    return `grid-template-columns: ${grids[0].node.props.style.gridTemplateColumns}`
+  })
+  // 宿主按供应商过滤后一把都没剩（用户还没配）：界面要明确说清，且**不本地补一份候选名**
+  keysOverride = { provider: 'deepseek-official', primaryRef: 'DEEPSEEK_API_KEY', nextRef: 'DEEPSEEK_KEY', scanned: 0, keys: [] }
+  mount(Component, dsProps)
+  await tick()
+  const emptyTree = mount(Component, dsProps)
+  const emptyHtml = render(emptyTree)
+  const emptyPairs = nodesWithParent(emptyTree)
+  test('一把 key 都没有：卡片明确说清，且候选名只用宿主给的那一个', () => {
+    assert.ok(emptyHtml.includes('这个供应商还没有可用的密钥引用'),
+      `空列表必须说清（别让人以为界面坏了）：${emptyHtml.slice(0, 400)}`)
+    const note = emptyPairs.find(item => item.node.props?.style?.gridColumn === '1 / -1')
+    assert.ok(note !== undefined, `空列表说明应整行铺满（gridColumn 1/-1）：${emptyPairs.map(i => i.text).filter(Boolean).slice(0, 12).join(' | ')}`)
+    assert.ok(note.text.includes('这个供应商还没有可用的密钥引用'), `整行说明得是那句话：${JSON.stringify(note.text)}`)
+    assert.equal(note.node.props.style.overflowWrap, 'anywhere', '窄卡片里要能断行')
+    const input = emptyPairs.find(item => item.node.type === 'input' && item.node.props?.type === 'password')
+    assert.equal(input.node.props.placeholder, 'DEEPSEEK_KEY', 'placeholder 用宿主给的 nextRef')
+    assert.equal(emptyHtml.includes('DEEPSEEK_API_KEY_2'), false, '本地不许再补一份全局候选名清单')
+    return '说清 · 整行说明 · 候选名只认宿主的 nextRef'
+  })
+  keysOverride = null
 })()
 /**
  * 逼设置页 store 重新拉一次 `/report`：宿主夹具改完之后必须走这一步
@@ -1737,7 +1920,8 @@ await (async () => {
       for (const needle of ['模型花费卡片', '本会话费用', '额度横条', '右下角角标']) {
         assert.ok(zh.html.includes(needle), `显示页缺少分组「${needle}」：${zh.html.slice(-400)}`)
       }
-      for (const needle of ['「近 90 天」读日汇总', '每 15 秒刷新一次', '峰谷档位与倒计时', '可选 Top-1 模型']) {
+      for (const needle of ['「近 90 天」读日汇总', '每 15 秒刷新一次', '峰谷档位与倒计时', '可选 Top-1 模型',
+        '接下来 6 个档位切换点']) {
         assert.ok(zh.html.includes(needle), `显示页缺少说明「${needle}」：${zh.html.slice(-400)}`)
       }
       return '4 个标题 + 4 段说明'
@@ -1760,13 +1944,27 @@ await (async () => {
       const labels = ['Show the model cost card', 'Expanded by default', 'Remember expanded state',
         'Show tokens', 'Show cost share bars', 'Show this-session cost', 'Show cache hit rate',
         'Include subagents', 'Show the strip above the input', 'Also show the balance in the strip',
-        'Show the corner badge', 'Include the Top-1 model']
+        'Show the corner badge', 'Include the Top-1 model',
+        'Show peak schedule & price table in the sidebar']
       const empty = en.texts.filter(text => text.trim().length === 0)
       assert.deepEqual(empty, [], `英文页有 ${empty.length} 个勾选框没有文案`)
       for (const label of labels) {
         assert.ok(en.texts.includes(label), `英文页缺少勾选框「${label}」，实际：${en.texts.join(' / ')}`)
       }
+      assert.ok(en.html.includes('Peak schedule'), `英文页缺少峰谷表：${en.html.slice(-400)}`)
       return `${en.texts.length} 个勾选框 · 英文文案齐全`
+    })
+    // 峰谷关掉时 `/report` 的 `peak` 是 null：那张表要明说原因，不是留一张空表
+    const savedPeak = REPORT.peak
+    REPORT.peak = null
+    REPORT.ui = savedUi   // 上面刚切过英文，空态文案按中文那版断言
+    await reloadReportPage()
+    const noPeakHtml = render(mount(CostPage))
+    REPORT.peak = savedPeak
+    await reloadReportPage()
+    test('峰谷关着（peak 为 null）→ 那张表写「峰谷没有开启」，不装作没有切换点', () => {
+      assert.ok(noPeakHtml.includes('峰谷没有开启'), `空态要有说明：${noPeakHtml.slice(-400)}`)
+      return '空态有说明'
     })
   } finally {
     REPORT.ui = savedUi

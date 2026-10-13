@@ -1160,7 +1160,7 @@ await test('officialPeak 随 state.json 重载（loadStore 认这个键，非法
 
 console.log('\n[界面偏好：语言 / 轮询间隔 / 隐藏区块 / 会话 ID]')
 await test('三处 payload 共用同一份 ui（/state、/sidebar、/report）', async () => {
-  const expected = { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false }
+  const expected = { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false }
   const state = (await call('GET', '/plugins/dsh-balance-monitor/state')).json.state.ui
   const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.ui
   const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.ui
@@ -1184,17 +1184,21 @@ await test('POST /config：ui 是局部补丁，只沉淀与默认不同的字�
   const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 5, locale: 'fr' } })
   assert.equal(junk.json.data.ui.refreshSeconds, 15, '越界间隔保持原值')
   assert.equal(junk.json.data.ui.locale, 'en', '不认识的语言保持原值')
-  // 三个布尔开关
+  // 四个布尔开关（`sidebarTools` 默认 false，所以存的是「打开」这一位）
   const flags = await call('POST', '/plugins/dsh-balance-monitor/config', {
-    ui: { hideOfficialBalance: true, hideTodayCost: true, showSessionId: true },
+    ui: { hideOfficialBalance: true, hideTodayCost: true, showSessionId: true, sidebarTools: true },
   })
   assert.equal(flags.json.data.ui.hideOfficialBalance, true)
+  assert.equal(flags.json.data.ui.sidebarTools, true, '侧栏两个操作行默认关，打开后要生效')
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).ui,
-    { locale: 'en', refreshSeconds: 15, hideOfficialBalance: true, hideTodayCost: true, showSessionId: true })
+    { locale: 'en', refreshSeconds: 15, hideOfficialBalance: true, hideTodayCost: true, showSessionId: true, sidebarTools: true })
+  // 客户端是照 `/sidebar` 里这份 ui 决定渲不渲染那两行的 —— 三处 payload 必须都带上这一位
+  const sidebarUi = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.ui
+  assert.equal(sidebarUi.sidebarTools, true, '侧栏 payload 必须带 sidebarTools')
   // null = 回默认
   const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: null })
   assert.deepEqual(cleared.json.data.ui,
-    { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false })
+    { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).ui, undefined, '回默认 = 文件里不留一条')
   return '局部补丁 · 非法保持 · null 回默认'
 })
@@ -1573,7 +1577,7 @@ await test('POST /keys/reveal：只对属于该路线的引用回值，其它引
   assert.equal(JSON.stringify(list.json).includes('sk-key'), false, '/keys 不该含值')
   return 'DEEPSEEK_API_KEY → 值 · 其它引用 403'
 })
-await test('方案 B：凭据文件里的自定义命名也能列出来（只取键名）', async () => {
+await test('方案 B：凭据文件里的自定义命名能扫到，但只有属于本路线的才进列表', async () => {
   // 沙箱里放一份凭据文件：一个常规名 + 一个完全不合规律的命名
   const file = join(sandbox, '.credentials.yaml')
   writeFileSync(file, [
@@ -1593,14 +1597,22 @@ await test('方案 B：凭据文件里的自定义命名也能列出来（只取
     ? { configured: true, source: 'file', writable: true }
     : { configured: false, writable: true }
   const discovery = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyCandidates
+  // 「文件里扫到」与「属于本路线」是两回事：文件名照原样带出（诊断用）
   assert.ok(discovery.scannedFromFile.includes('DSK_BACKUP_1'), `文件扫描结果：${JSON.stringify(discovery.scannedFromFile)}`)
-  assert.ok(discovery.foundRefs.includes('DSK_BACKUP_1'), `命中：${JSON.stringify(discovery.foundRefs)}`)
+  // 但 DSK_BACKUP_1 既不在 apiKeyEnv 的候选里、也不在 deepseekKeys 里 → 不属于这条路线：
+  // 不进扫描候选 / 命中 / 卡片（否则点「小眼睛」就是 403 —— 列表与权限两套判据打架）
+  assert.equal(discovery.scanned.includes('DSK_BACKUP_1'), false, `扫描候选里不该有它：${JSON.stringify(discovery.scanned)}`)
+  assert.equal(discovery.foundRefs.includes('DSK_BACKUP_1'), false, `不该算命中：${JSON.stringify(discovery.foundRefs)}`)
   assert.equal(JSON.stringify(discovery).includes('fake-two'), false, '不能把值带出来')
   assert.equal(JSON.stringify(discovery).includes('fake-token'), false, 'records 段的 token 更不能带出来')
-  // GET /keys 也会列它（未纳入配置 → 显示为可加的引用）
   const keys = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
-  assert.ok(keys.keys.some(item => item.ref === 'DSK_BACKUP_1' && item.configured === true), JSON.stringify(keys.keys))
-  return `scannedFromFile=${discovery.scannedFromFile.length} · 命中含 DSK_BACKUP_1`
+  assert.equal(keys.keys.some(item => item.ref === 'DSK_BACKUP_1'), false, `卡片不该列不属于它的引用：${JSON.stringify(keys.keys)}`)
+  // 「先纳入配置、再属于这条路线」：写进 deepseekKeys 之后才进列表
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: ['DSK_BACKUP_1'] })
+  const after = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  assert.ok(after.keys.some(item => item.ref === 'DSK_BACKUP_1' && item.configured === true), `纳入后应列出：${JSON.stringify(after.keys)}`)
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  return `scannedFromFile=${discovery.scannedFromFile.length} · 自定义名「先纳入再列出」`
 })
 
 await test('scanCredentialsFile: false → 退回纯候选名探测（不碰凭据文件）', async () => {
@@ -1637,6 +1649,116 @@ await test('GET /report 下发密钥扫描配置（界面要能回填与编辑�
   const restored = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
   assert.deepEqual(restored, before, '收尾后应完全回到默认')
   return '回填 · 归一 · 越界回落'
+})
+
+console.log('\n[密钥列表按供应商过滤：卡片只列属于自己的引用（截图里那批别家的 key）]')
+/** 用户截图里躺在同一份 `.credentials.yaml` 里的其它供应商引用名。 */
+const FOREIGN_KEY_REFS = [
+  'JIUHAOCHE_API_KEY', 'WALK_GROK_API_KEY', 'WALK_GPT_API_KEY',
+  'NANSHANYOUGUI_CLAUDE_API_KEY', 'POJIA_GPT_API_KEY', 'WBFT_API_KEY',
+]
+const credentialsService = ctx.get('credentials')
+const savedDescribe = credentialsService.describe
+/**
+ * 夹具（照截图搭）：一份「多供应商混住」的凭据文件，且 describe 对**每一个**引用都报
+ * `configured: true` —— 这正是 bug 现场：旧写法把它们全列进 DeepSeek 卡片并标「已配置」，
+ * 点「小眼睛」却被 `/keys/reveal` 以「不属于 deepseek-official，拒绝返回」打回。
+ */
+writeFileSync(join(sandbox, '.credentials.yaml'), [
+  'version: 1',
+  'refs:',
+  '  DEEPSEEK_API_KEY: fake-ds-one',
+  '  DEEPSEEK_API_KEY_2: fake-ds-two',
+  '  DSK_BACKUP_1: fake-backup',
+  ...FOREIGN_KEY_REFS.map(ref => `  ${ref}: fake-${ref.toLowerCase()}`),
+  'records:',
+  '  deepseek-account-platform/default:',
+  '    kind: grant',
+  '    payload:',
+  '      token: fake-token-should-not-leak',
+  '',
+].join('\n'), 'utf8')
+const configuredInFixture = new Set(['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2', 'DSK_BACKUP_1', ...FOREIGN_KEY_REFS])
+credentialsService.describe = async ref => (configuredInFixture.has(ref)
+  ? { configured: true, source: 'file', writable: true }
+  : { configured: false, writable: true })
+
+await test('GET /keys：DeepSeek 卡片只列 DEEPSEEK_API_KEY / _2，别家的引用一个都不列', async () => {
+  const data = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  const refs = data.keys.map(item => item.ref)
+  assert.deepEqual(refs, ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2'], `卡片实际列出：${JSON.stringify(refs)}`)
+  const leaked = FOREIGN_KEY_REFS.filter(ref => JSON.stringify(data).includes(ref))
+  assert.deepEqual(leaked, [], `别家的引用名不该出现在卡片数据里：${JSON.stringify(leaked)}`)
+  assert.equal(JSON.stringify(data).includes('DSK_BACKUP_1'), false, '既不在 apiKeyEnv 也不在 deepseekKeys 的自定义名同样不列')
+  // 列出来的每一行都真的能读值（列表判据 == reveal 判据）
+  const revealed = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref: refs[0] })
+  assert.equal(revealed.statusCode, 200, `列出来的应能读值：${JSON.stringify(revealed.json).slice(0, 160)}`)
+  return `列出 ${refs.join(' / ')}（别家 ${FOREIGN_KEY_REFS.length} 个引用名一个都没列）`
+})
+await test('报表 keyCandidates 同一判据：scanned / foundRefs / candidates / added 全不列别家引用', async () => {
+  const discovery = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyCandidates
+  assert.deepEqual(discovery.foundRefs, ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2'], `命中：${JSON.stringify(discovery.foundRefs)}`)
+  for (const ref of [...FOREIGN_KEY_REFS, 'DSK_BACKUP_1']) {
+    assert.equal(discovery.scanned.includes(ref), false, `${ref} 不该进扫描候选：${JSON.stringify(discovery.scanned)}`)
+    assert.equal(discovery.candidates.includes(ref), false, `${ref} 不该进「可加」候选：${JSON.stringify(discovery.candidates)}`)
+    assert.equal(discovery.added.includes(ref), false, `${ref} 不该进「已计入」：${JSON.stringify(discovery.added)}`)
+  }
+  // 文件里确实躺着这些名字（诊断字段原样带出）：「文件里有」≠「属于本路线」
+  for (const ref of FOREIGN_KEY_REFS) {
+    assert.ok(discovery.scannedFromFile.includes(ref), `诊断字段应照原样带出 ${ref}：${JSON.stringify(discovery.scannedFromFile)}`)
+  }
+  return `${discovery.scanned.length} 个候选（文件里另有 ${FOREIGN_KEY_REFS.length} 个别家引用名，未进列表）`
+})
+await test('POST /keys/reveal：别家引用仍然 403；放宽的只有本路线自己的 apiKeyEnv 命名空间', async () => {
+  // 收紧的那一半：别家的引用名一律 403，且拒绝时绝不回值（安全口径没放松）
+  for (const ref of FOREIGN_KEY_REFS) {
+    const res = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref })
+    assert.equal(res.statusCode, 403, `${ref} → ${res.statusCode}：${JSON.stringify(res.json)}`)
+    assert.match(String(res.json.error), /拒绝返回/)
+    assert.equal(JSON.stringify(res.json).includes('fake-'), false, `${ref} 被拒时更不能回值`)
+  }
+  // 既不在 apiKeyEnv 命名空间、也没纳入配置的自定义名：同样 403
+  const backup = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref: 'DSK_BACKUP_1' })
+  assert.equal(backup.statusCode, 403, JSON.stringify(backup.json))
+  // 放宽的那一半（有意为之，且只限本路线自己的命名空间）：`apiKeyEnv` 推导出来的名字
+  // （`DEEPSEEK_API_KEY` / `_2`…）本来就列在这张卡片的列表里，眼睛必须能读。
+  // 旧写法只认 deepseekKeys，于是列表里点 `_2` 反而 403 —— 正是用户报的「两套判据打架」。
+  for (const ref of ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2']) {
+    const ok = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref })
+    assert.equal(ok.statusCode, 200, `${ref} 是本路线 apiKeyEnv 命名空间里的引用，应能读：${JSON.stringify(ok.json).slice(0, 160)}`)
+  }
+  return `${FOREIGN_KEY_REFS.length} 个别家引用 + DSK_BACKUP_1 全 403 · 本命名空间的 API_KEY / _2 仍 200`
+})
+await test('归属按 route 走：限定给账号路线的条目，官方卡片不列、reveal 也拒（旧写法会放行）', async () => {
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: [{ ref: 'DSK_ONLY_ACCOUNT', route: 'deepseek-account', label: '账号专用' }],
+  })
+  const official = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  assert.equal(official.keys.some(item => item.ref === 'DSK_ONLY_ACCOUNT'), false, `官方卡片不该列账号路线的条目：${JSON.stringify(official.keys)}`)
+  const refused = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref: 'DSK_ONLY_ACCOUNT' })
+  assert.equal(refused.statusCode, 403, `归属判据共用后这条应被拒：${JSON.stringify(refused.json)}`)
+  assert.match(String(refused.json.error), /不属于 deepseek-official/)
+  // 账号路线：这条条目属于它 → 列表里有它，归属这一关放行（夹具里没有值，所以是 404 不是 403）。
+  // 同时验证「没有 apiKeyEnv 的路线推不出凭据引用」：官方路线的 DEEPSEEK_API_KEY 不该出现在账号卡片上。
+  const account = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-account')).json.data
+  assert.deepEqual(account.keys.map(item => item.ref), ['DSK_ONLY_ACCOUNT'], `账号卡片只该列 route 匹配的条目：${JSON.stringify(account.keys)}`)
+  const accountReveal = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-account', ref: 'DSK_ONLY_ACCOUNT' })
+  assert.equal(accountReveal.statusCode, 404, `过得了归属这关、只是没配值：${JSON.stringify(accountReveal.json)}`)
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  return '官方：不列 + 403 · 账号：列 + 不被归属拦'
+})
+await test('过滤后一把 key 都没有：老实用空数组（界面据此说清），不拿别家的名字凑数', async () => {
+  // 先归零（不依赖上一条用例的收尾是否跑到：断言失败时它就不会跑）
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  // 「用户还没配」的现场：凭据服务对任何引用都回「没配」
+  credentialsService.describe = async () => ({ configured: false, writable: true })
+  const keys = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  assert.deepEqual(keys.keys, [], `应该老实给空数组：${JSON.stringify(keys.keys)}`)
+  assert.equal(keys.primaryRef, 'DEEPSEEK_API_KEY', '主 key 引用名照旧带出来（界面要能提示它没配）')
+  const account = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-account')).json.data
+  assert.deepEqual(account.keys, [], `账号路线没有 apiKeyEnv，推不出任何凭据引用：${JSON.stringify(account.keys)}`)
+  credentialsService.describe = savedDescribe
+  return 'keys=[] · primaryRef 仍在'
 })
 console.log('\n[界面数据面：26 周热力图 + 全历史「按模型」]')
 await test('喂两条不同模型的调用 → heatmap / modelsHistory 都对上，days.json 也存了明细', async () => {
