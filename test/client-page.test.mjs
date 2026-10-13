@@ -260,6 +260,13 @@ const SIDEBAR = {
   budget: { enabled: true, amount: 1000, currency: 'CNY', period: 'month', usedUsd: 55.3, usedAmount: 398.2, ratio: 0.3982 },
   basisIds: ['p1-03cb848a'],
 }
+/**
+ * 模型花费卡片的原始夹具。
+ * 「输入区三块」那节为了验「卡片关着时角标还显示 Top-1」把 `SIDEBAR.modelCard` 设成了 `null`，
+ * 复位时用的是它自己那份 `saved`（里面**没有** modelCard 这一位）→ 之后它就一直是 `undefined`。
+ * 后面的用例还要用这份卡片，所以在定义处先留一份原样的。
+ */
+const MODEL_CARD_FIXTURE = SIDEBAR.modelCard
 function Report_now() { return Date.parse('2026-10-13T02:00:00Z') }
 
 const KEYS = {
@@ -359,6 +366,11 @@ globalThis.window = {
  * 「A 的响应还在飞、用户已经切到 B」这个时序。
  */
 let sessionGate = null
+/**
+ * `/history/clear` 的响应覆盖：默认走夹具里那份「落盘成功」（`writeFailed: []`）。
+ * 用例要验「落盘失败要如实提示」时把它设成带 `writeFailed` 的那份。
+ */
+let historyClearOverride = null
 /** `sessionId` → 专用夹具（没登记的走通用 `sessionFixture`）。 */
 const sessionOverrides = new Map()
 /** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
@@ -373,7 +385,7 @@ globalThis.fetch = async (url, init) => {
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys') ? { ok: true, data: KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
-    : path.includes('/history/clear') ? { ok: true, data: { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
+    : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
     : path.includes('/session?') ? { ok: true, data: sessionFixtureOf(path) }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
@@ -637,11 +649,13 @@ test('切到「额度」页：供应商 / 类型 / 倍率 / 峰谷 / 备注', ()
   }
   return '额度行含倍数与余额'
 })
-test('切到「用量」页：token 汇总 + 26 周热力图 + 按模型统计入口', () => {
+test('切到「用量」页：token 汇总 + 27 列热力图 + 按模型统计入口', () => {
   assert.ok(clickText(tree, '用量'))
   tree = mount(CostPage)
   const html = render(tree)
-  for (const needle of ['缓存写入', '推理', '最近 3 天', 'Token 用量统计', '近 26 周', '按模型统计', 'cn:deepseek-v4.1-flash']) {
+  // 周数 = 渲染出来的列数：夹具首日 2026-04-15 是周三（weekday=3），182 天要补 3 格 →
+  // ceil((3 + 182) / 7) = 27 列。按 `ceil(182 / 7) = 26` 写就少一列（用例在「热力图摘要」那节钉住）。
+  for (const needle of ['缓存写入', '推理', '最近 3 天', 'Token 用量统计', '近 27 周', '按模型统计', 'cn:deepseek-v4.1-flash']) {
     assert.ok(html.includes(needle), `用量页缺少「${needle}」`)
   }
   return '四段内容齐全'
@@ -1477,6 +1491,20 @@ await (async () => {
       assert.ok(noTokensHtml.includes('本会话 ¥1.5000'), `其余部分照常渲染：${noTokensHtml.slice(0, 200)}`)
       return 'undefined tokens 也渲染得出来'
     })
+    // 缺 token 数（宿主没给这一档）和「真的用了 0 个 token」是两回事：
+    // 前者画 —（与 formatAmount 同判据），后者才是 0 —— 别把缺值静默补成 0。
+    sessionOverrides.set('sess-zerotok', sessionCaseOf('sess-zerotok', {
+      calls: 1, priced: 1, unpriced: 0, usd: 0.2, amount: 1.5, cost: 1.5,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
+      hitRate: 0.5, models: [],
+    }))
+    const zeroTokensHtml = await renderSafely(composerSession, { sessionId: 'sess-zerotok' })
+    test('token 缺值画 —、真 0 画 0（两回事）', () => {
+      assert.ok(noTokensHtml.includes('— tok'), `缺 tokens 应给 —：${noTokensHtml.slice(0, 200)}`)
+      assert.ok(!noTokensHtml.includes('0 tok'), `缺值不许画成 0：${noTokensHtml.slice(0, 200)}`)
+      assert.ok(zeroTokensHtml.includes('0 tok'), `真 0 仍画 0：${zeroTokensHtml.slice(0, 200)}`)
+      return '缺值 — · 真 0 → 0'
+    })
   } finally {
     // 闸门一定要放掉：留着会让后面任何一次 /session 请求挂住（用例失败时也一样）
     sessionGate = null
@@ -1529,6 +1557,25 @@ await (async () => {
     assert.ok(!probedHtml.includes('已导入'), '不该假装导入成功')
     return '原因说清楚 · 不假装'
   })
+  // 落盘失败：宿主返回的 `writeFailed` 不能丢 —— 内存清了但磁盘没写下去，
+  // 下次启动历史会「回来」，只说「已清空」就是把假象当结果。
+  historyClearOverride = {
+    ledgerDays: 2, records: 10, rollupDays: 3, rollupUsd: 1.2,
+    writeFailed: ['ledger.json: EACCES（拒绝访问）', 'days.json: EPERM'],
+  }
+  assert.ok(clickText(mount(CostPage), '清除全部历史'), '应有「清除全部历史」按钮')
+  assert.ok(clickText(mount(CostPage), '再点一次确认清空'), '应能点到确认按钮')
+  await tick()
+  await tick()
+  await tick()
+  const writeFailedHtml = render(mount(CostPage))
+  test('落盘失败 → 如实提示「内存已清，落盘失败：…」，不假装已清空', () => {
+    assert.ok(writeFailedHtml.includes('落盘失败'), `应报落盘失败：${writeFailedHtml.slice(-260)}`)
+    assert.ok(writeFailedHtml.includes('EACCES'), `失败原因要带出来：${writeFailedHtml.slice(-260)}`)
+    assert.ok(!writeFailedHtml.includes('已清空：明细'), `不许只说「已清空」：${writeFailedHtml.slice(-260)}`)
+    return '内存已清 · 落盘失败：原因已报'
+  })
+  historyClearOverride = null
 })()
 
 console.log('\n[左侧栏：余额可点击切换 DeepSeek 两条路线]')
@@ -1645,5 +1692,220 @@ await (async () => {
     return '原因：方向 + 倍数 + 倍率为 1 + 逐模型区间'
   })
 })()
+/**
+ * 逼设置页 store 重新拉一次 `/report`：宿主夹具改完之后必须走这一步
+ * （fetch 是 JSON 往返，改夹具不会自动生效）。分页标签按语言不同，两版都试。
+ */
+const reloadReportPage = async () => {
+  await tick()
+  await tick()
+  await tick()
+  const clicked = clickText(mount(CostPage), '刷新') || clickText(mount(CostPage), 'Refresh')
+  assert.ok(clicked, '找不到「刷新 / Refresh」按钮')
+  await tick()
+  await tick()
+  await tick()
+}
+/** 切到某个分页并取回渲染结果（点不动就报出来，别让用例静默跳过）。 */
+const openCostTab = (zhLabel, enLabel, marker) => {
+  const clicked = clickText(mount(CostPage), zhLabel) || clickText(mount(CostPage), enLabel)
+  const html = render(mount(CostPage))
+  return { clicked, html, markerVisible: html.includes(marker) }
+}
+
+// ────────── 显示页文案：新控件的 33 个键必须在 `S` 表里（早先整批写进了 `S2`）──────────
+console.log('\n[显示页文案：新控件的标题 / 说明 / 勾选框文案（S 表）]')
+await (async () => {
+  const savedUi = { ...REPORT.ui }
+  const openDisplay = () => {
+    const clicked = clickText(mount(CostPage), '显示') || clickText(mount(CostPage), 'Display')
+    const page = mount(CostPage)
+    return { clicked, page, html: render(page), texts: checkboxes(page).map(item => item.text) }
+  }
+  try {
+    await reloadReportPage()
+    const zh = openDisplay()
+    // 切英文：同一批控件的英文文案也得挪过去（只挪 zh 那份 = 英文页照旧空白）
+    REPORT.ui = { ...savedUi, locale: 'en' }
+    await reloadReportPage()
+    // 分页键没变（还是 display），语言切完不用再点一次分页
+    const enPage = mount(CostPage)
+    const en = { html: render(enPage), texts: checkboxes(enPage).map(item => item.text) }
+
+    test('显示页：四个新分组标题 + 四段说明都渲染出来了', () => {
+      assert.ok(zh.clicked, '点不到「显示」分页')
+      for (const needle of ['模型花费卡片', '本会话费用', '额度横条', '右下角角标']) {
+        assert.ok(zh.html.includes(needle), `显示页缺少分组「${needle}」：${zh.html.slice(-400)}`)
+      }
+      for (const needle of ['「近 90 天」读日汇总', '每 15 秒刷新一次', '峰谷档位与倒计时', '可选 Top-1 模型']) {
+        assert.ok(zh.html.includes(needle), `显示页缺少说明「${needle}」：${zh.html.slice(-400)}`)
+      }
+      return '4 个标题 + 4 段说明'
+    })
+    test('显示页：12 个勾选框都有文案（空串 = 文案键还留在 S2 里）', () => {
+      const labels = ['显示模型花费卡片', '默认展开', '记住展开状态', '显示 Token', '显示费用占比条',
+        '显示本会话费用', '显示缓存命中率', '包含子代理', '显示输入框上方的额度横条', '横条里也显示余额',
+        '显示右下角角标', '角标里带 Top-1 模型']
+      const empty = zh.texts.filter(text => text.trim().length === 0)
+      assert.deepEqual(empty, [], `有 ${empty.length} 个勾选框没有文案（文案键还在 S2 那张表里）`)
+      for (const label of labels) {
+        assert.ok(zh.texts.includes(label), `缺少勾选框「${label}」，实际：${zh.texts.join(' / ')}`)
+      }
+      return `${zh.texts.length} 个勾选框 · 12 个新控件都有文案`
+    })
+    test('切到英文：同一批控件的英文文案也在（两份表都要挪）', () => {
+      for (const needle of ['Model cost card', 'This session', 'Quota strip', 'Corner badge']) {
+        assert.ok(en.html.includes(needle), `英文页缺少分组「${needle}」：${en.html.slice(-400)}`)
+      }
+      const labels = ['Show the model cost card', 'Expanded by default', 'Remember expanded state',
+        'Show tokens', 'Show cost share bars', 'Show this-session cost', 'Show cache hit rate',
+        'Include subagents', 'Show the strip above the input', 'Also show the balance in the strip',
+        'Show the corner badge', 'Include the Top-1 model']
+      const empty = en.texts.filter(text => text.trim().length === 0)
+      assert.deepEqual(empty, [], `英文页有 ${empty.length} 个勾选框没有文案`)
+      for (const label of labels) {
+        assert.ok(en.texts.includes(label), `英文页缺少勾选框「${label}」，实际：${en.texts.join(' / ')}`)
+      }
+      return `${en.texts.length} 个勾选框 · 英文文案齐全`
+    })
+  } finally {
+    REPORT.ui = savedUi
+    await reloadReportPage()
+  }
+})()
+
+// ────────── 热力图摘要：读 heat 自己的数 / 周数 = 列数 / 空数据不渲染 ──────────
+console.log('\n[用量页热力图摘要：读 heat 自己的数、周数 = 列数、空数据不渲染]')
+await (async () => {
+  const savedHeat = REPORT.heatmap
+  /** 与客户端同一个写法（测试侧独立算一遍，别从实现里借） */
+  const tokensText = value => (value < 1e3
+    ? String(Math.round(value))
+    : value < 1e6 ? `${(value / 1e3).toFixed(1)}K` : `${(value / 1e6).toFixed(1)}M`)
+  const heatTokens = savedHeat.reduce((sum, row) => sum + (Number(row.tokens) || 0), 0)
+  const heatCalls = savedHeat.reduce((sum, row) => sum + (Number(row.calls) || 0), 0)
+  const allTokens = REPORT.totals.all.tokens.total
+  const firstWeekday = new Date(Date.parse(`${savedHeat[0].date}T00:00:00Z`)).getUTCDay()
+  const columns = Math.ceil((firstWeekday + savedHeat.length) / 7)
+  const openUsage = () => openCostTab('用量', 'Usage', 'Token 用量统计')
+  try {
+    await reloadReportPage()
+    test('摘要给的是 heat 这一档的合计（不是 totals.all 的全历史量）', () => {
+      const { clicked, html, markerVisible } = openUsage()
+      assert.ok(clicked && markerVisible, `点不到「用量」分页：${html.slice(0, 200)}`)
+      assert.ok(allTokens > heatTokens * 10, '夹具前提：全历史明显大于热力图这 182 天')
+      assert.ok(html.includes(`${tokensText(heatTokens)} tokens · ${heatCalls} 次调用`),
+        `摘要应是 heat 的合计（${tokensText(heatTokens)} / ${heatCalls}）：${html.slice(-400)}`)
+      assert.ok(!html.includes(`${tokensText(allTokens)} tokens`),
+        `不许把 totals.all 的量挂到「近 N 周」下面：${html.slice(-400)}`)
+      assert.ok(!html.includes(`${REPORT.totals.all.calls} 次调用`), '调用次数同理，要给 heat 的合计')
+      return `${tokensText(heatTokens)} tokens · ${heatCalls} 次调用`
+    })
+    test('周数 = 渲染出来的列数（首日周三补 3 格 → 27 列，不是 ceil(182/7)=26）', () => {
+      const { html } = openUsage()
+      assert.equal(firstWeekday, 3, '夹具前提：热力图首日是周三（否则测不到差一列）')
+      assert.equal(columns, 27, '夹具前提：补位后是 27 列')
+      assert.ok(html.includes(`近 ${columns} 周`), `周数该等于列数 ${columns}：${html.slice(-400)}`)
+      assert.ok(!html.includes('近 26 周'), '`ceil(len / 7)` 会少算首日补位那一列')
+      return `近 ${columns} 周 = 列数`
+    })
+    test('token 真 0 仍画 0（用量页「缓存写入」就是 0；缺值才画 —）', () => {
+      const { html } = openUsage()
+      assert.ok(html.includes('缓存写入 0'), `真 0 该画 0：${html.slice(0, 300)}`)
+      return '缓存写入 0'
+    })
+    // 空 heatmap（老宿主没给这一档）：摘要整段不渲染
+    REPORT.heatmap = []
+    await reloadReportPage()
+    test('老宿主没给 heatmap（空数组）→ 摘要不渲染（别编「近 1 周 0 tokens」）', () => {
+      const { html, markerVisible } = openUsage()
+      assert.ok(markerVisible, `热力图那块还在：${html.slice(-400)}`)
+      assert.ok(!/近 \d+ 周/.test(html), `空数据不该有摘要：${html.slice(-400)}`)
+      return '标题在 · 摘要不渲染'
+    })
+  } finally {
+    REPORT.heatmap = savedHeat
+    await reloadReportPage()
+  }
+})()
+
+// ────────── 侧栏：隐藏今日消耗的边界 / 角标只藏金额 / 横条倒计时自算 ──────────
+console.log('\n[侧栏：隐藏今日消耗的边界 / 角标只藏金额 / 横条倒计时自算]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  const strip = component('conversation.input.dock', 1).component
+  const corner = component('conversation.composer.dock', 0).component
+  const saved = {
+    // 注意：不能用 `SIDEBAR.modelCard` —— 前面那节把它复位成了 `undefined`（见 MODEL_CARD_FIXTURE 注释）
+    modelCard: MODEL_CARD_FIXTURE, ui: SIDEBAR.ui, corner: SIDEBAR.corner,
+    quotaStrip: SIDEBAR.quotaStrip, peak: SIDEBAR.peak,
+  }
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
+  try {
+    SIDEBAR.ui = { hideTodayCost: true }
+    SIDEBAR.modelCard = { ...saved.modelCard, enabled: true, period: 'today', position: 'bottom' }
+    await reloadSidebar()
+    const todayHtml = render(mount(sidebar.component))
+    SIDEBAR.modelCard = { ...saved.modelCard, enabled: true, period: 'days90', position: 'bottom' }
+    await reloadSidebar()
+    const days90Html = render(mount(sidebar.component))
+    test('隐藏今日消耗：今日金额行 + 「今日」周期的模型花费卡片整块收起', () => {
+      assert.ok(!todayHtml.includes('今日 ¥1.3997'), `今日金额行不该渲染：${todayHtml.slice(0, 260)}`)
+      assert.ok(!todayHtml.includes('模型花费'), '周期=今日的卡片要整块收起（标题与每行都是今日金额）')
+      return '今日行 + 卡片都不渲染'
+    })
+    test('说明里写明的「统计不受影响」得算数：次数 / token / 命中率照旧', () => {
+      for (const needle of ['160 次', '65.5M tok', '命中 98.6%']) {
+        assert.ok(todayHtml.includes(needle), `统计不该跟着藏：缺少「${needle}」：${todayHtml.slice(0, 260)}`)
+      }
+      return '160 次 · 65.5M tok · 命中 98.6%'
+    })
+    test('周期改成「近 90 天」→ 卡片照常显示（藏的是今日金额，不是历史花费）', () => {
+      assert.ok(days90Html.includes('模型花费'), `近 90 天的卡片该照常显示：${days90Html.slice(0, 260)}`)
+      assert.ok(days90Html.includes('近 90 天 ¥1.5437'), `标题应给周期与金额：${days90Html.slice(0, 260)}`)
+      return '近 90 天照旧'
+    })
+
+    SIDEBAR.corner = { enabled: true, showTop1: true }
+    await reloadSidebar()
+    const cornerHtml = render(mount(corner, {}))
+    test('角标：只藏「今日金额」那一段，峰谷档位与 Top-1 照显', () => {
+      assert.ok(!cornerHtml.includes('今日'), `金额那一段该藏：${cornerHtml}`)
+      assert.ok(cornerHtml.includes('峰时'), '档位不该跟着藏（藏了就等于不知道自己在峰段）')
+      assert.ok(cornerHtml.includes('Top-1 cn:deepseek-v4.1-flash'), `Top-1 照显：${cornerHtml}`)
+      return '峰时 · Top-1（无金额）'
+    })
+
+    SIDEBAR.ui = {}
+    SIDEBAR.quotaStrip = { enabled: true, showBalance: true }
+    // 宿主按 Accept-Language（英文）预格式化的串 + 本地时钟自算：客户端不该用前者
+    SIDEBAR.peak = {
+      ...saved.peak,
+      inPeak: true,
+      nextAtMs: Date.now() + 2 * 3600_000 + 5 * 60_000 + 30_000,
+      countdown: '2 hours 5 min',
+      countdownMs: 7_530_000,
+    }
+    await reloadSidebar()
+    const stripHtml = render(mount(strip, {}))
+    test('横条倒计时自己算（不跟着宿主预格式化的串换语言）', () => {
+      assert.ok(!stripHtml.includes('2 hours 5 min'), `不该直接用宿主串：${stripHtml}`)
+      assert.ok(stripHtml.includes('2 小时 5 分'), `应按 ui.locale 自算：${stripHtml}`)
+      return '2 小时 5 分（宿主串是英文也不跟）'
+    })
+  } finally {
+    SIDEBAR.modelCard = saved.modelCard
+    SIDEBAR.ui = saved.ui
+    SIDEBAR.corner = saved.corner
+    SIDEBAR.quotaStrip = saved.quotaStrip
+    SIDEBAR.peak = saved.peak
+  }
+  await reloadSidebar()
+})()
+
 console.log(`\n${passed} 通过 / ${failed} 失败`)
 process.exit(failed === 0 ? 0 : 1)
