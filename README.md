@@ -7,6 +7,18 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 
 只支持 Sub2Api 一种中转站类型（按用户决定，`New API` 类型暂不做）。
 
+### 0.7.0 改了什么（本轮收口）
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| `officialPeak` | 只在代码里注释「可存进 state.json」，`loadStore()` **根本不读**它 → 改峰谷窗口/假期只能改源码 | 真的接通了：`state.json` 或设置页「显示 → 官方峰谷」都能改（逐字段覆盖 + 打字错保护），并进计价依据指纹 |
+| 状态变更路由 | 只靠「监听回环」当防护；任意网页的简单 POST 能删 key / 改类型 / 触发抓取 | 加跨站拦截面：`Sec-Fetch-Site` / `Origin` / `content-type` 三条判据（见第五节） |
+| 密钥扫描配置 | 后端认 `scanCredentialsFile` / `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`，**前端没入口** | 设置页「显示 → 密钥扫描」补齐三个控件（含格式校验与回填） |
+| 多 key 明细 | 手填的引用没有 label → 侧栏只剩裸引用名 | 按名字派生短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`），卡片填的 label 仍优先 |
+| `mismatch` 告警 | 只说「与站方实扣不一致」，不给原因 | 宿主给结构化原因（差多少倍 / 方向 / 倍率是否报 1 / 逐模型反推区间），客户端按语言拼句子 |
+| README | 路由表缺 `/keys`（四条方法）与 `/keys/reveal`；字段表缺 5 个键；「API Key 从不进响应体」与实现矛盾 | 补齐路由表与字段表，安全表述改成事实描述 |
+| 测试门槛 | 离线 289 用例 | 离线 **322** 用例（新增 officialPeak 归一、跨站拦截面、label 派生、mismatch 原因、密钥扫描配置） |
+
 ---
 
 ## 一、它查什么
@@ -37,6 +49,9 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 
 `乘出来的花费` 与 `站方实扣` 差值超过 2% 时置 `mismatch` 并在界面上标注
 （jiuhaoche 实测存在 `effective=1` 而 `actual/cost=1.28` 的口径分歧），**以接口倍率为准，不会被反推值覆盖**。
+0.7.0 起不只标「不一致」，还给出**结构化原因**（宿主管算事实、客户端按语言拼句子）：差多少倍、
+高还是低、倍率接口是不是报的 1（＝多半不按「官方价 × 倍率」这条公式计费）、
+以及逐模型反推倍率的区间（＝站方按模型逐个定价）。
 
 ### DeepSeek 的**两条路线**（0.6.0 新增：余额可点击切换）
 
@@ -47,14 +62,25 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | `DeepSeek` | `deepseek-official` | `Authorization: Bearer`（API Key） | `api.deepseek.com/user/balance` → 例：`-0.01 CNY` |
 | `DeepSeek Account` | `deepseek-account` | `x-dsh-auth-token`（宿主 `deepseekAccount` 服务签发） | `platform.deepseek.com/api/v0/users/get_user_summary` → 例：`normal_wallets -0.0433720200000000` · `bonus_wallets 0` |
 
-  **怎么知道有哪些 key**：宿主凭据服务没有枚举 refs 的接口（`listRecords()` 只覆盖 `records:` 段），
-  所以插件按**候选名**用 `credentials.describe(ref)` 探测（只回「有没有配 / 来源」，**不读值**）：
-  默认扫 `DEEPSEEK_API_KEY`、`DEEPSEEK_API_KEY_2`…`_9` 与 `DEEPSEEK_KEY*`（共 18 个），
-  设置页把命中的做成下拉候选，也可用 `deepseekKeyPrefixes` / `deepseekKeyMaxIndex` 改扫描范围。- **多把 key**：宿主自己的 DeepSeek API Key 适配器只认一把（`apiKeyEnv` 是单值），想按多把 key 汇总
-  就在本插件里列引用：`state.json` 的 `deepseekKeys: ["DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_2"]`
-  （也支持 `[{ ref, label }]`）——**侧栏余额 = 各把 key 之和**，币种不一致时不显示总额。- 侧栏**余额行点一下就在两条之间切换**（`余额 · DeepSeek ⇄ ¥0.01` → `余额 · DeepSeek Account ⇄ ¥-0.04`），
+- **怎么知道有哪些 key**（两条路一起用）：
+  1. **按候选名探测**：宿主凭据服务没有枚举 refs 的接口（`listRecords()` 只覆盖 `records:` 段），
+     所以插件用 `credentials.describe(ref)` 逐个问（只回「有没有配 / 来源」，**不读值**）：
+     默认扫 `DEEPSEEK_API_KEY`、`DEEPSEEK_API_KEY_2`…`_9` 与 `DEEPSEEK_KEY*`（共 18 个），
+     扫描范围可用 `deepseekKeyPrefixes` / `deepseekKeyMaxIndex` 改（设置页「显示 → 密钥扫描」）。
+  2. **读凭据文件的引用名**（0.7.0）：直接解析 `~/.dsh/.credentials.yaml` 里 `refs:` 段的**键名**
+     —— 命名再怪也列得全。**只取键名，值连读都不读**（正则只捕获冒号前的名字，不在结果里）；
+     关掉的方式是 `state.json` 的 `scanCredentialsFile: false`，插件就退回纯候选名探测。
+- **多把 key**：宿主自己的 DeepSeek API Key 适配器只认一把（`apiKeyEnv` 是单值），想按多把 key 汇总
+  就用 `deepseekKeys` 列引用（字符串或 `[{ ref, label }]`）——**侧栏余额 = 各把 key 之和**，
+  币种不一致时不显示总额。没填 label 的引用会按名字派生一个短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`）。
+- **卡片上的密钥编辑区**（0.7.0）：在 DeepSeek 卡片的「添加 key」行里直接填 key → `PUT /keys`
+  写进宿主凭据库（顺位引用名，或自己填 `ref` / `label`），每行可删（**主 key 拒绝删**，
+  要换请走卡片上方宿主自己的「API 密钥」）。默认**不预取明文**，点行内小眼睛才 `POST /keys/reveal`
+  拉一次值；该路由只认「属于这条路线」的引用（别的引用一律 403）。
+- 侧栏**余额行点一下就在两条之间切换**（`余额 · DeepSeek ⇄ ¥0.01` → `余额 · DeepSeek Account ⇄ ¥-0.04`），
   选择记在 `localStorage['balance-monitor:sidebar-balance']`；只有一条路线时不可点（提示里说明）。
-- 账号路线的 token 由宿主服务签发（只有宿主拿得到），插件不碰磁盘上的凭据；
+- 账号路线的 token 由宿主服务签发（只有宿主拿得到），插件**不读**磁盘上的凭据值
+  （唯一碰 `~/.dsh/.credentials.yaml` 的地方是上面那条「只取键名」）；
   平台端点失败时回落到推理域（同一 token 也认，但金额被官方四舍五入到 2 位），并标注来源
   （`account-platform` / `account-api` / `api-key`）。
 - **两条都按官方计价**：不打站方倍率，也不算「未定价」。
@@ -70,16 +96,17 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写） |
+| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
 
 **本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
 `storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
 两个天数都能在设置页「显示 → 账本保留」里改（见第四节 `retention`）。
 报表里的「今日」仍以账本为准，两者相减避免重复计数。
 
-**改配置会发生什么**：`display` / `budget` / `priceSources` 都是白名单写入 `state.json`；
-改币种、汇率或来源等级会换掉计价依据指纹（`p1-…`），**只影响之后的调用**，历史金额一分不动
-（未定价的调用仍然显示 `—`，不会被画成 0）。
+**改配置会发生什么**：`display` / `budget` / `priceSources` / `officialPeak` / 密钥扫描三项
+都是白名单写入 `state.json`；改币种、汇率、来源等级或**峰谷窗口/假期**会换掉计价依据指纹（`p1-…`），
+**只影响之后的调用**，历史金额一分不动（未定价的调用仍然显示 `—`，不会被画成 0）。
+密钥扫描三项不进指纹（它只决定「能发现哪些 key」）。
 
 ### 侧栏底部：余额 / 今日 / 峰谷倒计时（0.3.0 新增）
 
@@ -220,6 +247,11 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   "budget": { "enabled": false, "amount": null, "period": "month" },
   "retention": { "ledgerDays": 7, "rollupDays": 400 },
   "peakNotify": { "enabled": true, "system": false },
+  "officialPeak": { "enabled": true, "windows": [{ "start": 1, "end": 4 }], "holidays": ["2026-10-01"] },
+  "deepseekKeys": ["DEEPSEEK_API_KEY", { "ref": "DEEPSEEK_API_KEY_2", "label": "第二把" }],
+  "deepseekKeyPrefixes": ["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
+  "deepseekKeyMaxIndex": 9,
+  "scanCredentialsFile": false,
   "priceSources": ["official", "station", "manual"],
   "priceTable": { "models": { }, "providers": { }, "aliases": { } }
 }
@@ -233,12 +265,27 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `peakNotify`：峰谷提醒开关（`enabled` 侧栏横幅 / `system` 系统通知），设置页「显示」可改。
   两位都是**局部覆盖**：只提交一位不会把另一位带掉；两个都关 = 清掉这条配置。默认都关（不弹）。
   判定跟着侧栏 30s 轮询走，且只对**刚发生**的换档提醒（90s 内）——页面关着跨过的那次只记不报。
+- `officialPeak`：官方峰谷配置，**逐字段**覆盖随包默认表（第八节），设置页「显示 → 官方峰谷」可改。
+  字段缺失或非法 → 该字段回落默认；`windows: []`（永不判峰）与 `holidays: []`（没有假期）是**有效值**，
+  但「给了非空数组却一条都不合法」按打字错处理、回落默认（免得一个笔误丢掉整年假期）。
+  改它会换计价依据指纹，**只影响之后的调用**。
+- `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
+  卡片上的密钥编辑区会自动维护它；侧栏余额 = 各把之和（币种不一致就不给总额）。
+- `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
+  （默认 `DEEPSEEK_API_KEY`、`DEEPSEEK_KEY` × `_2…_9`），设置页「显示 → 密钥扫描」可改。
+- `scanCredentialsFile`：读 `~/.dsh/.credentials.yaml` 里 `refs:` 段的**键名**（不读值）来补全候选名。
+  只有显式 `false` 才关（关掉就退回纯候选名探测）；默认开。
 - `priceSources`：允许参与计价的来源等级（第八节）；不写就是 `official + station + manual`。
 - `priceTable`：整段覆盖默认价表（默认表见第八节）；不写就用随包的默认表（官方快照 + 站方快照）。
 - `ledger.json` / `days.json` / `prices.json`：账本 / 日汇总 / 站方价目；账本**只加总不重算**。
 
 **探测结果只放内存**（60s 缓存），不落盘：账号余额/花费不在磁盘上留副本。
-API Key 从不落盘、从不进响应体——它对外的全部痕迹是 `hasKey: true/false`。
+
+API Key 对外的**只读**痕迹只有 `hasKey: true/false`。但要说清楚两条例外（0.7.0 起）：
+`GET /keys` 只回「引用名 + 配没配」（**不含值**）；`POST /keys` 会把你在卡片上填的 key
+写进宿主凭据库（`credentials.set`），`POST /keys/reveal`（点卡片上的小眼睛才走）会把某个
+引用的**明文**回给界面。也就是说「key 不落盘、不进响应体」这句只对**探测流程**成立，
+密钥编辑区这条路是显式写入/读取宿主凭据库的，见第五节。
 
 这两个字段都**不写进 pi-ai 的 provider 配置**。上游的 provider profile schema 是 `z.object(...)`（非 strict），
 往里面塞自定义字段能否存活没有验证过；本插件把自己的状态放在自己的存储里、按 provider id 索引，绕开这一点。
@@ -253,24 +300,49 @@ API Key 从不落盘、从不进响应体——它对外的全部痕迹是 `hasK
 客户端只访问宿主自带 webserver 上的**同源**路由：
 
 ```
-GET  /plugins/dsh-balance-monitor/state                  → { ok, state }
-GET  /plugins/dsh-balance-monitor/sidebar                → { ok, data }（余额/今日/峰谷相位）
-POST /plugins/dsh-balance-monitor/type    { provider, type }
-POST /plugins/dsh-balance-monitor/refresh { provider? }
-POST /plugins/dsh-balance-monitor/vision/auto  { provider, enabled }
-POST /plugins/dsh-balance-monitor/vision/apply { provider? }
-GET  /plugins/dsh-balance-monitor/report                 → { ok, data }（设置页「余额与费用」整页数据）
-POST /plugins/dsh-balance-monitor/config { display?, budget?, priceSources? }   → 白名单写入并回传新指纹
-POST /plugins/dsh-balance-monitor/balance/refresh { provider? } → 强制刷新官方余额（两条路线）
-GET  /plugins/dsh-balance-monitor/prices                 → 价目状态（来源/条数/更新时间）
-POST /plugins/dsh-balance-monitor/prices/update          → 抓取站方价目并落盘
-GET  /plugins/dsh-balance-monitor/                        → 一张说明页（调试用）
+GET    /plugins/dsh-balance-monitor/state                  → { ok, state }
+GET    /plugins/dsh-balance-monitor/sidebar                → { ok, data }（余额/今日/峰谷相位）
+POST   /plugins/dsh-balance-monitor/type    { provider, type }
+POST   /plugins/dsh-balance-monitor/refresh { provider? }
+POST   /plugins/dsh-balance-monitor/vision/auto  { provider, enabled }
+POST   /plugins/dsh-balance-monitor/vision/apply { provider? }
+GET    /plugins/dsh-balance-monitor/report                 → { ok, data }（设置页「余额与费用」整页数据）
+POST   /plugins/dsh-balance-monitor/config { display?, budget?, retention?, peakNotify?, priceSources?,
+                                             officialPeak?, scanCredentialsFile?, deepseekKeyPrefixes?,
+                                             deepseekKeyMaxIndex?, deepseekKeys? }
+                                                           → 白名单写入并回传新指纹
+POST   /plugins/dsh-balance-monitor/balance/refresh { provider? } → 强制刷新官方余额（两条路线）
+GET    /plugins/dsh-balance-monitor/prices                 → 价目状态（来源/条数/更新时间）
+POST   /plugins/dsh-balance-monitor/prices/update          → 抓取站方价目并落盘
+GET    /plugins/dsh-balance-monitor/keys?provider=<id>     → { ok, data }（引用名 + 配没配，**不含值**）
+PUT    /plugins/dsh-balance-monitor/keys { provider, value, ref?, label? } → 写入宿主凭据库
+DELETE /plugins/dsh-balance-monitor/keys { provider, ref } → 删掉一把（主 key 拒绝删）
+POST   /plugins/dsh-balance-monitor/keys/reveal { provider, ref } → 回**明文**（只认属于该路线的引用）
+GET    /plugins/dsh-balance-monitor/                        → 一张说明页（调试用）
 ```
+
+### 状态变更路由的跨站拦截面（0.7.0 新增）
+
+这个 webserver 本身不鉴权（宿主不管认证），所以「本机任意进程」挡不住、也没打算挡
+（它能直接读凭据文件）。要挡的是**任意网页**：一个简单请求（无预检）就能把 POST 打进来，
+让插件替你删 key / 写 key / 改类型 / 触发抓取。所以 `POST` / `PUT` / `DELETE` / `PATCH`
+一律先过三条判据，任一条命中即拒：
+
+| 判据 | 响应 | 挡的是什么 |
+|---|---|---|
+| `Sec-Fetch-Site` 存在且不是 `same-origin` / `none` | `403` | 跨站请求（含同站子域） |
+| `Origin` 存在且与 `Host` 不同源（含字面量 `null`） | `403` | 跨源请求 / 沙箱 iframe / `file://` |
+| `content-type` 存在但不是 `application/json` | `415` | HTML 表单、`no-cors` fetch |
+
+三个头**都不带**时放行（`curl`、脚本、老客户端）—— 那不是浏览器发起的跨站请求，拦它只会把
+命令行用法挡在门外。GET 一律不校验。所以从脚本调这些路由时，**带上
+`content-type: application/json`** 最稳妥（不带也能过，但带上就走正规路径）。
 
 没有用 typert/remote：那条路要求把客户端从 TS 源码构建出 `$mount` 产物，本插件手写客户端模块、零构建步骤。
 
-> 该路由没有鉴权（宿主 webserver 本身不管认证），但只监听回环地址，且**不返回任何密钥**，
-> 只返回派生出来的额度/倍率/花费数字。请求体上限 16 KiB。
+> 该路由没有鉴权（宿主 webserver 本身不管认证），但只监听回环地址。除了 `keys/reveal`
+> 那一条**（点小眼睛才请求，且只认属于该路线的引用）**，其余响应都不含密钥，
+> 只有派生出来的额度/倍率/花费数字。请求体上限 16 KiB。
 
 ### 零 `@deepseek-ai/*` 依赖
 
@@ -303,18 +375,18 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 289 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 322 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
-$NODE test/pricing.test.mjs          # 档位与计价纯函数（68 个用例）：官方峰谷（含未来切换点）、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
+$NODE test/pricing.test.mjs          # 档位与计价纯函数（79 个用例）：官方峰谷（含未来切换点）、officialPeak 归一、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
 $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（40 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
-$NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（31 个用例）
+$NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（34 个用例）：解析、花费、口径分歧的结构化原因
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices）+ 手工喂假流验证记账（73 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（25 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站拦截面 + 手工喂假流验证记账（87 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（30 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -324,7 +396,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 289 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 322 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -338,14 +410,14 @@ nanshanyougui `0.10`、jiuhaoche `1`），倍率被站方改过会直接失败�
 walk-grok  → 倍率=0.09  官方价=407.324016  按倍率=36.6592  站方实扣=36.65916144
 walk-gpt   → 倍率=0.12  官方价=240.8780449 按倍率=28.9054  站方实扣=28.905365388
 nanshanyougui → 倍率=0.1 官方价=21.6428696 按倍率=2.1643   站方实扣=2.16428696
-jiuhaoche  → 倍率=1     官方价=0.005074   按倍率=0.0051   站方实扣=0.006494  ← mismatch 告警
+jiuhaoche  → 倍率=1     官方价=0.005074   按倍率=0.0051   站方实扣=0.006494  ← mismatch 告警（×1.28，倍率接口报 1）
 ```
 
 ### 代码结构
 
 ```
 lib/sub2api.js        适配器核心：归一 baseURL、解析两个接口（+ 模型清单的 credits）、算花费。零依赖、可用任意 fetchImpl 测
-lib/pricing.js        档位与计价：官方峰谷本地判定、站方倍率复算、credits、三层相乘、未定价语义、入账即固化（纯函数、零依赖）
+lib/pricing.js        档位与计价：官方峰谷本地判定 + officialPeak 归一、站方倍率复算、credits、三层相乘、未定价语义、入账即固化（纯函数、零依赖）
 lib/price-table.js         默认价目表（**自动生成，勿手改**）：DeepSeek 主表 + 17 家厂商目录 + 别名，每条带来源等级
 lib/price-table-station.js 站方口径价目快照（**自动生成，勿手改**）：LiteLLM 价目（Sub2Api 就是用它算钱的）
 lib/litellm-prices.js      站方价目：抓取链（raw → 镜像 → GitHub API blobs）、字段转换、长上下文档、合并
@@ -353,9 +425,10 @@ lib/usage-ledger.js        用量账本 + 侧栏/报表聚合：按天/按供应
 lib/billing-stream.js `llm/stream` 计费包裹：usage 捕获、嵌套只记一次、提前中断关流（零依赖）
 lib/balance.js        DeepSeek 两条路线的余额：API Key（domain 白名单）与账号（平台 get_user_summary + 推理域兜底）
 lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺口、生成 settings.mutate 的路径 op
-lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices）
+lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
-test/*.mjs            九套用例，离线门槛 289 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由与假流）+ client-page（假 React 真渲染）
+lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
+test/*.mjs            九套用例，离线门槛 322 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、跨站拦截面与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -374,9 +447,10 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
    换货币要站点未公开的基准价，本模块**不猜**。
 3. **余额只有 DeepSeek 两条路线有接口**。中转站没有余额端点 → 侧栏不显示那一行，
    官方余额也只在 `api.deepseek.com` 域名上查（白名单，防 key 被送到别处）。
-4. **多 key 只能按名字探测**。宿主凭据服务不能枚举 refs，插件按**前缀 + 序号**扫
-   （默认 `DEEPSEEK_API_KEY[_2..9]`、`DEEPSEEK_KEY[_2..9]`，共 18 个候选）。
-   命名不合规律的扫不到，要靠 `state.json` 的 `deepseekKeys` 手填。
+4. **多 key 的发现面仍不完整**。候选名扫描（默认 18 个）＋ `~/.dsh/.credentials.yaml` 的
+   `refs:` 键名（0.7.0）已经覆盖绝大多数命名；但**键名不在该文件里、也不符合候选前缀**的引用
+   依然列不出来，只能靠 `state.json` 的 `deepseekKeys` 手填。另外凭据文件格式变了（非块状写法）就
+   退回纯候选名探测，插件不抛错。
 5. **`official` 价目只有 20 条**（DeepSeek 主表 4 + 厂商文档 16），其余 557 条落在
    `reseller` / `aggregator` / `unknown` 三档，默认**不参与计价**（见第八节）。没命中的模型就是未定价。
 6. **峰谷提醒的粒度是 30 秒**。判定、相位、侧栏倒计时、一键预览切换点、跨档提醒（侧栏横幅 +
@@ -385,17 +459,23 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
    系统通知要浏览器授权（被拒就只剩横幅）。要做秒级提醒得在宿主侧挂定时器，本插件不这么做。
 7. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
 8. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
+9. **跨站拦截面只挡浏览器**（0.7.0，见第五节）：`Sec-Fetch-Site` / `Origin` / `content-type`
+   三条判据都靠浏览器自己带的头，所以本机脚本、`curl`（只要不带这些头）照样能打这些路由。
+   想连本地进程也挡住，得让宿主 webserver 支持鉴权 —— 那不在本插件的能力范围内。
 
 ### 未做（能补，还没补）
 
-9. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
-   **没有跨进程文件锁**。同一台机器跑两个宿主实例同时记账，理论上会互相覆盖。
-10. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
+10. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
+    **没有跨进程文件锁**。同一台机器跑两个宿主实例同时记账，理论上会互相覆盖。
+11. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
     （接错 API 会把整张卡片打崩，所以先用防御式探测）。
-11. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
+12. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
     自动补全的触发点是「设置 → 模型」页面渲染出本插件的卡片（也就是 `/state` 被访问）——
     不开这个页面时不会后台定时扫。写盘失败会进入 30s 冷却，不会每次请求都撞同一堵墙。
-12. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
+13. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
+14. **峰谷「窗口 / 假期」没有填错时的二次确认**：界面只做格式校验（`1-4,6-10` 这种写法），
+    把 `1-4` 写成 `1-14` 这种「格式合法但语义不对」的值会照收 —— 值本身是合法配置，
+    插件不替用户判断意图。
 
 ---
 
@@ -423,7 +503,8 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 | 附加规则 | 周末全谷、法定调休、生效时刻、调价历史 | 仅订阅型分组、非法/非峰 → 1.0、`multiplier=0` 合法 |
 | 网络 | 不需要 | 快照 60s + 峰谷边界刷新 |
 
-官方侧默认值（`DEFAULT_OFFICIAL_PEAK`，可直接存进 `state.json` 的 `officialPeak`）：
+官方侧默认值（`DEFAULT_OFFICIAL_PEAK`）—— `state.json` 的 `officialPeak`（或设置页
+「显示 → 官方峰谷」）就是按这个结构**逐字段**覆盖它：
 
 ```json
 {
@@ -437,8 +518,14 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 ```
 
 - `windows` 是 **UTC 小时**、半开区间 `[start, end)`；`{1,4}`+`{6,10}` ＝ 北京 09:00–12:00、14:00–18:00。
-- `holidays` 是北京日历日，**每年要人工更新**；调休上班的周末仍按周末判谷。
+  设置页把它写成 `1-4,6-10` 这种紧凑形式，保存前解析回数组（格式不对就不让保存）。
+- `holidays` 是北京日历日，**每年要人工更新** —— 0.7.0 起不用改源码了：设置页「显示 → 官方峰谷」
+  的假期输入框（逗号分隔）或 `state.json` 的 `officialPeak.holidays` 都能改。
+  调休上班的周末仍按周末判谷。
 - `effectiveAt` 之前的调用不套峰谷，`legacyBoundary` 之前按价表的 `legacyBase`（历史正确性）。
+- 归一规则（`lib/pricing.js` 的 `normalizeOfficialPeak`）：字段缺失/非法 → 该字段回落默认；
+  `windows: []`（永不判峰）与 `holidays: []`（没有假期）是有效值；给了非空数组却一条都不合法
+  按打字错处理、回落默认。`enabled: false` 或空窗口会让相位块整体消失（侧栏不显示倒计时条）。
 
 **展示侧**（都不参与计价，只影响界面）：
 

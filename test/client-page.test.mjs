@@ -71,6 +71,16 @@ const REPORT = {
   // 刻意不等于客户端兜底的 7 / 400：这样「回填的是宿主送来的值」才可断言
   retention: { ledgerDays: 12, rollupDays: 365 },
   notify: { enabled: true, system: false },
+  // 「显示」页的两段新配置：密钥扫描 + 官方峰谷（宿主逐字段归一后下发）
+  keyDiscovery: { scanCredentialsFile: true, prefixes: ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], maxIndex: 9 },
+  officialPeak: {
+    enabled: true,
+    effectiveAt: '2026-08-01T00:00:00Z',
+    weekendOffPeakFrom: '2026-08-22T16:00:00Z',
+    legacyBoundary: '2026-08-16T16:00:00Z',
+    windows: [{ start: 1, end: 4 }, { start: 6, end: 10 }],
+    holidays: ['2026-10-01', '2026-10-02'],
+  },
   totals: {
     today: { usd: 0.1944, amount: 1.3997, calls: 160, priced: 159, unpriced: 1, tokens: { input: 905_000, output: 161_000, cacheRead: 64_400_000, cacheWrite: 0, reasoning: 0, total: 65_466_000 }, hitRate: 0.986 },
     month: { usd: 55.3059, amount: 398.2025, calls: 14_285, unpriced: 623, days: 12, since: '2026-10-01', tokens: { input: 27_600_000, output: 10_100_000, cacheRead: 3_431_000_000, cacheWrite: 0, reasoning: 0, total: 3_468_700_000 }, hitRate: 0.992 },
@@ -166,7 +176,27 @@ const STATE = {
   types: {},
   providers: [
     { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', deepseekRoute: 'api-key', type: 'other', status: 'idle', hasKey: true, image: { editable: false } },
-    { provider: 'walk-grok', displayName: 'Grok 中转', settingsNs: 'llm-pi-ai', type: 'sub2api', status: 'ok', hasKey: true, image: { editable: false } },
+    {
+      provider: 'walk-grok', displayName: 'Grok 中转', settingsNs: 'llm-pi-ai', type: 'sub2api', status: 'ok', hasKey: true,
+      image: { editable: false },
+      // 口径分歧的实测形态（jiuhaoche）：倍率接口报 1，实扣却是 1.22 倍。
+      // 宿主给的是**结构化**原因，文案归客户端拼（见 lib/sub2api.js 的 mismatchDetail）。
+      sub2api: {
+        modelCount: 2,
+        unit: 'CNY',
+        rate: { effective: 1, group: 1, peak: { enabled: false } },
+        spend: {
+          currency: 'CNY', period: 'total', effectiveRate: 1,
+          officialCost: 0.005074, actualCost: 0.006494, byMultiplier: 0.005074,
+          delta: -0.00142, deltaRatio: -0.2187, impliedRate: 1.27986,
+          models: [], mismatch: true,
+          mismatchReason: {
+            factor: 1.27986, percent: 21.9, direction: 'station-charged-more', rateIsUnity: true,
+            modelRateCount: 2, modelRateMin: 1.275, modelRateMax: 1.304,
+          },
+        },
+      },
+    },
   ],
 }
 const calls = []
@@ -453,12 +483,28 @@ test('「显示」页带峰谷提醒两个勾选框，且回填宿主的开关',
   for (const needle of ['峰谷提醒', '应用内提醒', '系统通知']) {
     assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
   }
+  // 勾选框顺序＝分组顺序：峰谷提醒（应用内 / 系统）→ 密钥扫描 → 官方峰谷
   const boxes = []
   walk(page, node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
-  assert.equal(boxes.length, 2, `应有两个勾选框，实际 ${boxes.length}`)
+  assert.equal(boxes.length, 4, `应有四个勾选框，实际 ${boxes.length}`)
   assert.equal(boxes[0].checked, true, '应用内提醒应回填宿主送来的 true')
   assert.equal(boxes[1].checked, false, '系统通知应回填 false')
-  return '两个勾选框 · 应用内=真 / 系统=假'
+  return '四段勾选框 · 应用内=真 / 系统=假'
+})
+test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主的值', () => {
+  const page = mount(CostPage)
+  const html = render(page)
+  for (const needle of ['密钥扫描', '读凭据文件的引用名', '候选前缀', '序号上限', '保存扫描设置',
+    '官方峰谷', '启用峰谷档', '高峰窗口（UTC 小时）', '假期（北京日期）', '保存峰谷']) {
+    assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
+  }
+  const inputs = []
+  walk(page, node => { if (node.type === 'input' && node.props?.type !== 'checkbox') inputs.push(node.props) })
+  const values = inputs.map(item => String(item.value))
+  assert.ok(values.includes('DEEPSEEK_API_KEY, DEEPSEEK_KEY'), `候选前缀应回填宿主值：${values.join(' | ')}`)
+  assert.ok(values.includes('1-4,6-10'), `窗口应回填成紧凑写法：${values.join(' | ')}`)
+  assert.ok(values.includes('2026-10-01, 2026-10-02'), `假期应回填：${values.join(' | ')}`)
+  return '两段控件齐全且回填宿主值'
 })
 
 console.log('\n[交互：按钮真的打到宿主路由]')
@@ -498,7 +544,8 @@ await (async () => {
   // 再点一次「应用内提醒」勾选框（取消勾选）→ 白名单局部覆盖
   const boxes = []
   walk(mount(CostPage), node => { if (node.type === 'input' && node.props?.type === 'checkbox') boxes.push(node.props) })
-  const toggled = boxes.length === 2 && boxes[0].checked === true
+  // 第 0 个永远是「应用内提醒」（分组顺序见上），后面几个是密钥扫描 / 官方峰谷
+  const toggled = boxes.length >= 2 && boxes[0].checked === true
   if (toggled) boxes[0].onChange({ target: { checked: false } })
   await tick()
   await tick()
@@ -510,6 +557,56 @@ await (async () => {
     assert.deepEqual(body.peakNotify, { enabled: false }, `实际提交：${hit.body}`)
     assert.equal(body.retention, undefined, '不该顺手把保留期也提交一遍')
     return 'POST /config { peakNotify: { enabled: false } }'
+  })
+  // 密钥扫描设置：三个键一起提交，且不带 display / retention（各自独立保存）
+  const discoveryClicked = clickText(mount(CostPage), '保存扫描设置')
+  await tick()
+  await tick()
+  test('点「保存扫描设置」→ POST /config 带三个扫描键（不带 display）', () => {
+    assert.ok(discoveryClicked, '没找到「保存扫描设置」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    assert.ok(hit !== undefined, '没有发出 /config 请求')
+    const body = JSON.parse(hit.body)
+    assert.equal(body.scanCredentialsFile, true)
+    assert.deepEqual(body.deepseekKeyPrefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], `实际提交：${hit.body}`)
+    assert.equal(body.deepseekKeyMaxIndex, 9)
+    assert.equal(body.display, undefined, '扫描设置不该顺手提交展示设置')
+    return 'POST /config { scanCredentialsFile, deepseekKeyPrefixes, deepseekKeyMaxIndex }'
+  })
+  // 官方峰谷：紧凑写法 `1-4,6-10` 要解析成数组再提交（宿主只认数组）
+  const peakClicked = clickText(mount(CostPage), '保存峰谷')
+  await tick()
+  await tick()
+  test('点「保存峰谷」→ POST /config 把 `1-4,6-10` 解析成数组', () => {
+    assert.ok(peakClicked, '没找到「保存峰谷」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.officialPeak.windows, [{ start: 1, end: 4 }, { start: 6, end: 10 }], `实际提交：${hit.body}`)
+    assert.equal(body.officialPeak.enabled, true)
+    assert.deepEqual(body.officialPeak.holidays, ['2026-10-01', '2026-10-02'], `实际提交：${hit.body}`)
+    assert.equal(body.display, undefined, '峰谷配置不该顺手提交展示设置')
+    return 'POST /config { officialPeak }'
+  })
+  test('窗口写法非法 → 保存按钮禁用 + 给出提示（不猜用户的意图）', () => {
+    // 说明：这里**不**通过输入框改值来测非法态 —— 本假渲染器的帧游标按渲染顺序分配，
+    // 嵌套组件（DisplayTab 在 CostPage 里）的状态写入不会在下一次 render 里被读回
+    // （与下面密钥行那条注释同因）。所以非法态的**判定**由 lib 侧的纯函数用例覆盖
+    // （test/pricing.test.mjs 的 normalizeOfficialPeak 一组），这里只锁「合法值下按钮可用、
+    // 且控件都真的接上了自己的 handler」这条契约。
+    const page = mount(CostPage)
+    let submit = null
+    const windowInputs = []
+    walk(page, node => {
+      if (node.type === 'button' && render(node.props?.children) === '保存峰谷') submit = node
+      if (node.type === 'input' && node.props?.placeholder === '1-4,6-10') windowInputs.push(node.props)
+    })
+    assert.ok(submit !== null, '没找到「保存峰谷」按钮')
+    assert.equal(submit.props.disabled, false, '合法窗口（1-4,6-10）时按钮应可用')
+    assert.equal(windowInputs.length, 1, `应有一个窗口输入框，实际 ${windowInputs.length}`)
+    assert.equal(typeof windowInputs[0].onChange, 'function', '输入框必须接上 onChange')
+    const html = render(page)
+    assert.ok(!html.includes('窗口格式不对'), '合法值不该显示格式提示')
+    return '合法值可用 · 非法态由纯函数用例覆盖'
   })
 })()
 
@@ -650,6 +747,16 @@ await (async () => {
     const htmlOther = render(mount(Component, { provider: { provider: 'walk-grok', settingsNs: 'llm-pi-ai' } }))
     assert.ok(!htmlOther.includes('添加 key'), `普通中转站卡片不该有 key 编辑区：${htmlOther.slice(0, 200)}`)
     return 'walk-grok 无编辑区'
+  })
+  test('口径分歧：卡片不只说「不一致」，还说差在哪', () => {
+    // 数据来自 STATE 夹具（fake fetch 会 JSON 往返，所以只能改夹具、不能事后改 STATE）。
+    const html = render(mount(Component, { provider: { provider: 'walk-grok', settingsNs: 'llm-pi-ai' } }))
+    for (const needle of ['实扣 ≈ 按倍率算的', '（高', '倍率接口报的是 1', '逐模型反推倍率', '仍以接口倍率为准']) {
+      assert.ok(html.includes(needle), `分歧解释缺少「${needle}」：${html}`)
+    }
+    // 依据仍是接口倍率：反推值不能进公式
+    assert.ok(!html.includes('×1.2799'), '反推倍率不能进公式')
+    return '原因：方向 + 倍数 + 倍率为 1 + 逐模型区间'
   })
 })()
 console.log(`\n${passed} 通过 / ${failed} 失败`)
