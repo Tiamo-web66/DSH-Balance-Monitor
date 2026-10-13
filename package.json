@@ -1,0 +1,45 @@
+{
+  "name": "dsh-balance-monitor",
+  "version": "0.2.0",
+  "private": true,
+  "description": "DeepSeek Harness 余额监控 + 模态补全：在「设置 → 模型」的供应商卡片上按类型（Sub2Api / 其他）查询额度、倍率、模型并按倍率算花费；给 llm-pi-ai 里没声明输入模态的模型自动补 input:[text,image]，新增自定义供应商不用再逐个勾「图片」。Balance monitor plus image-modality backfill on the Models settings cards.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./client": { "default": "./lib/client.js" },
+    "./vision": { "default": "./lib/vision.js" },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-models"]
+    }
+  },
+  "meta": {
+    "title": "余额监控 + 图片补全",
+    "description": "在模型设置页给每个供应商选类型（Sub2Api / 其他），Sub2Api 类型会查询额度、倍率与模型并按倍率计算花费；同时给没声明输入模态的模型自动补上图片能力，新加的自定义供应商不用再逐个手动勾。"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node test/pricing.test.mjs && node test/litellm-prices.test.mjs && node test/credentials-refs.test.mjs && node test/usage-ledger.test.mjs && node test/balance.test.mjs && node test/sub2api.test.mjs && node test/vision.test.mjs && node test/host.test.mjs && node test/client-page.test.mjs",
+    "test:offline": "node test/pricing.test.mjs && node test/litellm-prices.test.mjs && node test/credentials-refs.test.mjs && node test/usage-ledger.test.mjs && node test/balance.test.mjs && node test/sub2api.test.mjs --offline && node test/vision.test.mjs && node test/host.test.mjs && node test/client-page.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "license": "MIT"
+}

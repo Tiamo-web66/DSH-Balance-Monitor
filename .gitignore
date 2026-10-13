@@ -1,0 +1,3 @@
+# 探测产物：含账号信息/额度数值，不纳入版本库
+research/out/
+node_modules/
