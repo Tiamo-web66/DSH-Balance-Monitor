@@ -180,6 +180,20 @@ test('会话数有上限，不会无限增长', () => {
   deduper.admit('s3', 'm', BUCKETS, T0 + 2)
   assert.equal(deduper.size(), 2)
 })
+test('没有 sessionId 的调用一律放行（宁可多记一次也不漏账）', () => {
+  // 宿主内部调用不一定带会话 id。若把它们都归进同一个空串桶，同模型 + 同 token 数的
+  // 两次**真实**调用会被判成重复样本丢掉一笔（实测 4 笔记成 3 笔）。
+  const deduper = createUsageDeduper({ windowMs: 10_000 })
+  assert.equal(deduper.admit(undefined, 'm', BUCKETS, T0), true)
+  assert.equal(deduper.admit(undefined, 'm', BUCKETS, T0 + 1), true, '同一毫秒级窗口内也不去重')
+  assert.equal(deduper.admit('', 'm', BUCKETS, T0 + 2), true)
+  assert.equal(deduper.admit(null, 'm', BUCKETS, T0 + 3), true)
+  assert.equal(deduper.size(), 0, '它们不该占用会话表')
+  // 带会话的照旧去重
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0), true)
+  assert.equal(deduper.admit('s1', 'm', BUCKETS, T0 + 10), false)
+  return '无会话 = 放行'
+})
 
 console.log('\n[展示币种与倒计时]')
 test('toDisplay：USD 直出，CNY 乘汇率，汇率非法按 1', () => {

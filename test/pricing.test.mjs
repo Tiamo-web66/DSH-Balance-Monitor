@@ -706,6 +706,43 @@ test('窗口数字串也认，越界/非整数的整条丢掉', () => {
   const config = normalizeOfficialPeak({ windows: [{ start: '6', end: '10' }, { start: 0, end: 24 }, { start: 1.5, end: 4 }] })
   assert.deepEqual(config.windows, [{ start: 6, end: 10 }])
 })
+test('退化窗口 start === end 当非法丢（否则跨午夜分支会判成全天高峰）', () => {
+  // 光看 isPeakHour 的注释会以为「5-5」没影响：实际 `hour >= 5 || hour < 5` 恒真 → 全天峰价
+  const naive = { enabled: true, windows: [{ start: 5, end: 5 }], holidays: [] }
+  assert.equal(isPeakHour(at('2026-08-25T18:00:00Z'), naive), true, '宿主侧原语义确实是全天高峰')
+  const mixed = normalizeOfficialPeak({ windows: [{ start: 5, end: 5 }, { start: 1, end: 4 }] })
+  assert.deepEqual(mixed.windows, [{ start: 1, end: 4 }], '退化的丢掉，合法的照留')
+  const only = normalizeOfficialPeak({ windows: [{ start: 5, end: 5 }] })
+  assert.deepEqual(only.windows, DEFAULT_OFFICIAL_PEAK.windows, '全是退化 → 按打字错回落默认')
+})
+test('跨午夜窗口（start > end）仍然合法', () => {
+  const config = normalizeOfficialPeak({ windows: [{ start: 22, end: 2 }] })
+  assert.deepEqual(config.windows, [{ start: 22, end: 2 }])
+  assert.equal(isPeakHour(at('2026-08-25T23:00:00Z'), config), true, 'UTC 23 点在窗口内')
+  assert.equal(isPeakHour(at('2026-08-25T01:00:00Z'), config), true, 'UTC 01 点也在窗口内')
+  assert.equal(isPeakHour(at('2026-08-25T12:00:00Z'), config), false)
+})
+test('假期只认真实存在的日历日（2026-02-30 这种要丢掉）', () => {
+  // Date.parse('2026-02-30') 是有限值（V8 滚到 3-02），但它永远不等于 beijingDayKey()
+  // 产出的任何日期 → 那条假期是死的：用户以为配了，那天照峰价算。
+  assert.ok(Number.isFinite(Date.parse('2026-02-30')), '前提：Date.parse 确实会放行它')
+  const config = normalizeOfficialPeak({ holidays: ['2026-02-30', '2026-12-25', '2026-13-01'] })
+  assert.deepEqual(config.holidays, ['2026-12-25'], '只留真实存在的日期')
+  assert.equal(isPeakHour(at('2026-12-25T01:30:00Z'), config), false, '留下的那天确实按谷价')
+})
+test('超大 atMs 不抛（Date 上界之外只判不了日历日，不许崩）', () => {
+  // 纯函数要对任意入参是全函数：`new Date(8.64e15).toISOString()` 会抛 RangeError，
+  // 而 `beijingDayKey` 原来在 scanSwitch / phaseAt 的探测路径里会被调到。
+  assert.equal(beijingDayKey(8.64e15), null, '+8h 平移后越界 → 判不了')
+  assert.equal(beijingDayKey(9e15), null)
+  assert.doesNotThrow(() => beijingDayKey(-8.64e15), '负上界只是结果古怪，不该抛')
+  assert.equal(beijingDayKey(Number.NaN), null)
+  assert.equal(beijingDayKey(Number.POSITIVE_INFINITY), null)
+  assert.doesNotThrow(() => phaseAt(8.64e15), 'phaseAt 不该抛')
+  assert.doesNotThrow(() => phaseAt(9e15), '超过 Date 上界也不该抛')
+  assert.doesNotThrow(() => upcomingSwitches(8.64e15), 'upcomingSwitches 不该抛')
+  assert.doesNotThrow(() => upcomingSwitches(9e15, { limit: 3 }), '超过 Date 上界也不该抛')
+})
 test('坏时刻串回落默认，而不是让整段配置失效', () => {
   const config = normalizeOfficialPeak({ effectiveAt: 'not-a-date', legacyBoundary: '' })
   assert.equal(config.effectiveAt, DEFAULT_OFFICIAL_PEAK.effectiveAt)

@@ -73,6 +73,8 @@ const REPORT = {
   notify: { enabled: true, system: false },
   // 「显示」页的两段新配置：密钥扫描 + 官方峰谷（宿主逐字段归一后下发）
   keyDiscovery: { scanCredentialsFile: true, prefixes: ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], maxIndex: 9 },
+  // Host 白名单（默认空 = 只允许回环；这里给一条，验证界面能回填与保存）
+  allowedHosts: ['panel.example.com'],
   officialPeak: {
     enabled: true,
     effectiveAt: '2026-08-01T00:00:00Z',
@@ -218,7 +220,7 @@ globalThis.window = {
 }
 globalThis.fetch = async (url, init) => {
   const path = String(url)
-  calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null })
+  calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys') ? { ok: true, data: KEYS }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
@@ -495,6 +497,7 @@ test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主�
   const page = mount(CostPage)
   const html = render(page)
   for (const needle of ['密钥扫描', '读凭据文件的引用名', '候选前缀', '序号上限', '保存扫描设置',
+    '访问控制', '额外允许的主机名', '保存白名单',
     '官方峰谷', '启用峰谷档', '高峰窗口（UTC 小时）', '假期（北京日期）', '保存峰谷']) {
     assert.ok(html.includes(needle), `显示页缺少「${needle}」`)
   }
@@ -504,7 +507,8 @@ test('「显示」页新增密钥扫描与官方峰谷两段，且回填宿主�
   assert.ok(values.includes('DEEPSEEK_API_KEY, DEEPSEEK_KEY'), `候选前缀应回填宿主值：${values.join(' | ')}`)
   assert.ok(values.includes('1-4,6-10'), `窗口应回填成紧凑写法：${values.join(' | ')}`)
   assert.ok(values.includes('2026-10-01, 2026-10-02'), `假期应回填：${values.join(' | ')}`)
-  return '两段控件齐全且回填宿主值'
+  assert.ok(values.includes('panel.example.com'), `Host 白名单应回填：${values.join(' | ')}`)
+  return '三段控件齐全且回填宿主值'
 })
 
 console.log('\n[交互：按钮真的打到宿主路由]')
@@ -562,8 +566,7 @@ await (async () => {
   const discoveryClicked = clickText(mount(CostPage), '保存扫描设置')
   await tick()
   await tick()
-  test('点「保存扫描设置」→ POST /config 带三个扫描键（不带 display）', () => {
-    assert.ok(discoveryClicked, '没找到「保存扫描设置」按钮')
+  test('点「保存扫描设置」→ POST /config 带三个扫描键（不带 display）', () => {    assert.ok(discoveryClicked, '没找到「保存扫描设置」按钮')
     const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
     assert.ok(hit !== undefined, '没有发出 /config 请求')
     const body = JSON.parse(hit.body)
@@ -586,6 +589,57 @@ await (async () => {
     assert.deepEqual(body.officialPeak.holidays, ['2026-10-01', '2026-10-02'], `实际提交：${hit.body}`)
     assert.equal(body.display, undefined, '峰谷配置不该顺手提交展示设置')
     return 'POST /config { officialPeak }'
+  })
+  // 访问控制：Host 白名单（默认只允许回环，反代部署靠它放行）
+  const hostsClicked = clickText(mount(CostPage), '保存白名单')
+  await tick()
+  await tick()
+  test('点「保存白名单」→ POST /config 带 allowedHosts（小写化）', () => {
+    assert.ok(hostsClicked, '没找到「保存白名单」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.deepEqual(body.allowedHosts, ['panel.example.com'], `实际提交：${hit.body}`)
+    assert.equal(body.display, undefined, '白名单不该顺手提交展示设置')
+    return 'POST /config { allowedHosts }'
+  })
+  // 宿主把空数组当**有效值**（`windows: []` = 永不判峰 → 所有调用按谷价计价），
+  // 所以「清空输入框」必须解释成「沿用默认」，否则用户以为在恢复默认、其实改了计价。
+  // 夹具改完要**逼 store 重新拉一次 /report**（fetch 是 JSON 往返的深拷贝，改夹具不会自动生效）——
+  // 这里借「保存保留期」那次 saveConfig → load 把新数据带进来。
+  // 注意：await 只能写在 IIFE 体里 —— `test()` 是同步的，async 回调会被直接当成已通过。
+  const savedPeakConfig = REPORT.officialPeak
+  REPORT.officialPeak = { ...savedPeakConfig, windows: [], holidays: [] }
+  clickText(mount(CostPage), '显示')
+  clickText(mount(CostPage), '保存保留期')
+  await tick()
+  await tick()
+  await tick()
+  const blankClicked = clickText(mount(CostPage), '保存峰谷')
+  await tick()
+  await tick()
+  test('窗口留空 → 不提交 windows 键（回默认），而不是提交空数组（= 静默全谷价）', () => {
+    assert.ok(blankClicked, '没找到「保存峰谷」按钮')
+    const hit = calls.filter(call => call.path.endsWith('/config')).at(-1)
+    const body = JSON.parse(hit.body)
+    assert.equal(body.officialPeak.windows, undefined, `留空不该下发 windows：${hit.body}`)
+    assert.equal(body.officialPeak.holidays, undefined, `留空不该下发 holidays：${hit.body}`)
+    assert.equal(body.officialPeak.enabled, true, '开关本身照常提交')
+    return 'POST /config { officialPeak: { enabled } }'
+  })
+  // 复原夹具，并再逼一次重新加载（否则 store 里还是「空窗口」那份数据）
+  REPORT.officialPeak = savedPeakConfig
+  clickText(mount(CostPage), '保存保留期')
+  await tick()
+  await tick()
+  await tick()
+  test('所有写请求都带 content-type: application/json（否则会被宿主拦截面 415 掉）', () => {
+    // 宿主侧 crossSiteGuard 对状态变更路由要求 JSON 类型；用表单/文本类型发出去会被拒。
+    // 这条用例把「客户端所有写路径都带了头」钉住（漏一个就是整块 UI 静默失效）。
+    const writes = calls.filter(call => call.method !== 'GET')
+    assert.ok(writes.length >= 3, `应记录到多次写请求，实际 ${writes.length}`)
+    const bad = writes.filter(call => String(call.headers?.['content-type'] ?? '').split(';')[0].trim() !== 'application/json')
+    assert.deepEqual(bad.map(call => `${call.method} ${call.path}`), [], '每个写请求都必须带 application/json')
+    return `${writes.length} 次写请求全部带 JSON 类型`
   })
   test('窗口写法非法 → 保存按钮禁用 + 给出提示（不猜用户的意图）', () => {
     // 说明：这里**不**通过输入框改值来测非法态 —— 本假渲染器的帧游标按渲染顺序分配，

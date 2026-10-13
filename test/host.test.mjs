@@ -109,6 +109,8 @@ const routes = []
 const llmListeners = []
 /** 记录凭据服务收到的引用名，用来锁死「传原字符串即可」这个设计决定。 */
 const credentialCalls = []
+/** 宿主 logger 收到的 warn（断言「不许静默失败」）。 */
+const warns = []
 
 /**
  * 假 settings 服务：形状**照 `@deepseek-ai/dsh-settings` 的真实契约**来。
@@ -229,6 +231,8 @@ function makeCtx({ providers, settings } = {}) {
   return {
     get: name => services[name],
     webServer: services.webServer,
+    // 宿主的 logger：这里收集 warn，用来断言「静默失败」类问题（账本读/写失败必须留痕）
+    logger: { info() {}, warn(message) { warns.push(String(message)) } },
     effect: fn => { const d = fn(); return () => d?.() },
     // 宿主事件总线：只收集 llm/stream 监听器，供测试手工驱动。
     on: (event, listener) => {
@@ -343,6 +347,18 @@ await test('Origin 与 Host 同源 → 放行', async () => {
   const res = await call('POST', '/plugins/dsh-balance-monitor/config',
     {}, { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'content-type': 'application/json' })
   assert.equal(res.statusCode, 200)
+})
+await test('有 Sec-Fetch-Site 就以它为准：反代改写了 Host 也不误伤自己的 UI', async () => {
+  // nginx proxy_pass 默认会把 Host 写成上游地址，于是「页面同源、Host 是回环」同时成立。
+  // 这种部署下浏览器发的 Sec-Fetch-Site 仍是 same-origin，必须放行，否则所有写操作 403。
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config',
+    {}, { 'sec-fetch-site': 'same-origin', origin: 'https://panel.example.com', host: '127.0.0.1:3080', 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 200, res.json.error)
+  // 同源也要过 content-type 那一关
+  const bad = await call('POST', '/plugins/dsh-balance-monitor/config',
+    {}, { 'sec-fetch-site': 'same-origin', 'content-type': 'application/x-www-form-urlencoded' })
+  assert.equal(bad.statusCode, 415)
+  return 'same-origin 放行 · 跨站仍拒'
 })
 await test('content-type 是表单类型 → 415（HTML 表单打不进来）', async () => {
   const res = await call('POST', '/plugins/dsh-balance-monitor/config',
@@ -695,6 +711,34 @@ await test('账本落盘：state.json 旁多出 ledger.json，且带依据指纹
   return `${Object.keys(parsed.days).length} 天 / ${record.provider}`
 })
 
+await test('账本读不出来时：出声 + 不用空账本把 days.json 当天金额抹掉', async () => {
+  const dir = join(sandbox, 'storages', 'dsh-balance-monitor')
+  const ledgerFile = join(dir, 'ledger.json')
+  const rollupFile = join(dir, 'days.json')
+  // 前置：记一笔并等一次防抖写盘，让账本与日汇总都有当天数据
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'session-corrupt' })
+  await new Promise(resolve => setTimeout(resolve, 2200))
+  const rollupBefore = JSON.parse(readFileSync(rollupFile, 'utf8'))
+  const date = Object.keys(rollupBefore.days)[0]
+  const callsBefore = rollupBefore.days[date].calls
+  assert.ok(callsBefore > 0, `前置：days.json 当天应有记录，实际 ${JSON.stringify(rollupBefore.days)}`)
+  const ledgerBackup = readFileSync(ledgerFile, 'utf8')
+  // 破坏账本（半截 JSON）→ 重新 apply = 重启
+  writeFileSync(ledgerFile, '{"days":', 'utf8')
+  warns.length = 0
+  mod.apply(makeCtx({ providers, settings }))
+  const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.ok(warns.some(item => item.includes('账本读取失败')), `读失败必须留痕：${JSON.stringify(warns)}`)
+  assert.ok(report.totals.month.calls > 0, `月合计不该被抹成 0：${JSON.stringify(report.totals.month)}`)
+  assert.ok(report.totals.all.usd > 0, `累计金额不该被抹成 0：${JSON.stringify(report.totals.all)}`)
+  assert.equal(report.totals.today.ledgerStale, true, '要标明「明细缺失、总额来自日汇总」')
+  const rollupAfter = JSON.parse(readFileSync(rollupFile, 'utf8'))
+  assert.equal(rollupAfter.days[date].calls, callsBefore, 'days.json 当天不许被空账本覆盖')
+  // 还原，别给后面的用例留坏文件
+  writeFileSync(ledgerFile, ledgerBackup, 'utf8')
+  return `月 ${report.totals.month.calls} 笔未被抹平`
+})
+
 console.log('\n[价格表：GET /prices 与「更新价格表」]')
 await test('GET /prices 给出站方价目状态与允许的来源等级', async () => {
   const res = await call('GET', '/plugins/dsh-balance-monitor/prices')
@@ -941,6 +985,41 @@ await test('POST /config：officialPeak 垃圾输入不写坏配置', async () =
   return '非对象即清空'
 })
 
+await test('officialPeak 落盘时剔掉「与随包默认相同」的字段（别把当版假期表固化）', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const base = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.officialPeak
+  // 整段照当前生效值提交一遍（设置页的保存就是这个形状）
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: base })
+  assert.equal(saved.json.data.officialPeak.enabled, base.enabled, '生效值不变')
+  assert.deepEqual(saved.json.data.officialPeak.windows, base.windows)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).officialPeak, undefined,
+    '全等于默认 → 文件里不留一条（以后随包的假期表更新仍然生效）')
+  // 只有真的改过的字段才落盘
+  const changed = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    officialPeak: { windows: [{ start: 2, end: 5 }] },
+  })
+  assert.equal(changed.json.data.officialPeak.enabled, true, '没给的字段沿用当前值')
+  assert.deepEqual(changed.json.data.officialPeak.holidays, base.holidays, '假期仍是默认（没被固化）')
+  const stored = JSON.parse(readFileSync(file, 'utf8')).officialPeak
+  assert.deepEqual(stored, { windows: [{ start: 2, end: 5 }] }, `只落改动过的字段：${JSON.stringify(stored)}`)
+  // 收尾
+  await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: null })
+  return '只落差异字段'
+})
+
+await test('officialPeak 的局部补丁沿用当前值（不会把已关掉的峰谷打开）', async () => {
+  await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: { enabled: false, holidays: ['2026-12-25'] } })
+  const patch = await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: { windows: [{ start: 3, end: 4 }] } })
+  assert.equal(patch.json.data.officialPeak.enabled, false, '只改窗口不该把 enabled 带回默认 true')
+  assert.deepEqual(patch.json.data.officialPeak.holidays, ['2026-12-25'], '假期也保住')
+  assert.deepEqual(patch.json.data.officialPeak.windows, [{ start: 3, end: 4 }])
+  await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: null })
+  const cleared = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.officialPeak
+  assert.equal(cleared.enabled, true)
+  assert.deepEqual(cleared.windows, [{ start: 1, end: 4 }, { start: 6, end: 10 }], '回随包默认')
+  return '局部补丁不误伤别的字段'
+})
+
 await test('officialPeak 随 state.json 重载（loadStore 认这个键，非法项被剔）', async () => {
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
   const state = JSON.parse(readFileSync(file, 'utf8'))
@@ -1088,6 +1167,19 @@ await test('手填的引用没有 label → 派生短标签（卡片填的 label
   return 'API KEY · API KEY 2 · 自定义优先'
 })
 
+await test('派生标签撞车时退回带上引用名（两行不能长得一模一样）', async () => {
+  // `DEEPSEEK_API_KEY` 与 `API_KEY` 都派生成 `API KEY` —— 侧栏明细会分不清谁是谁。
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: ['DEEPSEEK_API_KEY', 'API_KEY'],
+  })
+  const list = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  const labels = list.keys.map(item => item.label)
+  assert.equal(new Set(labels).size, labels.length, `标签必须互不重复：${JSON.stringify(labels)}`)
+  assert.ok(labels.includes('API KEY（DEEPSEEK_API_KEY）'), `撞车的要带上引用名：${JSON.stringify(labels)}`)
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  return labels.join(' / ')
+})
+
 
 await test('方案 A：候选名探测（describe）列出可加的 key，不读值', async () => {
   const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
@@ -1229,6 +1321,59 @@ await test('GET /report 下发密钥扫描配置（界面要能回填与编辑�
   const restored = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
   assert.deepEqual(restored, before, '收尾后应完全回到默认')
   return '回填 · 归一 · 越界回落'
+})
+console.log('\n[Host 白名单：挡 DNS rebinding]')
+await test('rebinding 头（同源 + 恶意域名）→ 403，读和写都挡住', async () => {
+  // 攻击形态：恶意页所在的域名重新解析到 127.0.0.1，浏览器于是认为这是**同源**请求：
+  // Sec-Fetch-Site: same-origin + Origin/Host 都是攻击者域名 —— 跨站判据一条都命中不了。
+  // 放在文件末尾跑：这里的请求会真的触发探测 / 余额查询，别污染前面「默认不出网」的断言。
+  const rebind = { 'sec-fetch-site': 'same-origin', origin: 'http://evil.test:3080', host: 'evil.test:3080', 'content-type': 'application/json' }
+  const read = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal',
+    { provider: 'deepseek-official', ref: 'DEEPSEEK_API_KEY' }, rebind)
+  assert.equal(read.statusCode, 403, `明文读取必须被挡住：${JSON.stringify(read.json).slice(0, 120)}`)
+  assert.equal(JSON.stringify(read.json).includes('sk-key'), false, '不能漏出任何 key')
+  const write = await call('DELETE', '/plugins/dsh-balance-monitor/keys',
+    { provider: 'deepseek-official', ref: 'DEEPSEEK_API_KEY_2' }, rebind)
+  assert.equal(write.statusCode, 403)
+  assert.match(write.json.error, /不在允许列表/)
+  // GET 也挡（否则余额/花费能被读走）
+  const get = await call('GET', '/plugins/dsh-balance-monitor/report', undefined, rebind)
+  assert.equal(get.statusCode, 403)
+  const sidebar = await call('GET', '/plugins/dsh-balance-monitor/sidebar', undefined, rebind)
+  assert.equal(sidebar.statusCode, 403)
+  return '读写全挡 · 403'
+})
+await test('回环地址 / 无 Host / IPv6 回环都照常放行', async () => {
+  const cases = [
+    { host: '127.0.0.1:3080' },
+    { host: 'localhost:3080' },
+    { host: '127.1.2.3:3080' },
+    { host: '[::1]:3080' },
+    {},
+  ]
+  for (const headers of cases) {
+    const res = await call('GET', '/plugins/dsh-balance-monitor/state', undefined, headers)
+    assert.equal(res.statusCode, 200, `${JSON.stringify(headers)} → ${res.statusCode}：${res.json?.error ?? ''}`)
+  }
+  return `${cases.length} 种写法放行`
+})
+await test('allowedHosts 是逃生门：列出后放行，且不影响跨站判据', async () => {
+  const before = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.allowedHosts
+  assert.deepEqual(before, [], '默认是空（只允许回环）')
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    allowedHosts: ['Panel.Example.com', 'panel.example.com', '192.168.1.10:3080', 'bad host!'],
+  })
+  assert.deepEqual(saved.json.data.allowedHosts, ['panel.example.com', '192.168.1.10:3080'], '去重/转小写/非法项丢掉')
+  const ok = await call('GET', '/plugins/dsh-balance-monitor/state', undefined, { host: 'panel.example.com' })
+  assert.equal(ok.statusCode, 200, ok.json?.error ?? '')
+  // 白名单只放宽 Host 判据：跨站请求照样拒
+  const cross = await call('POST', '/plugins/dsh-balance-monitor/config',
+    {}, { host: 'panel.example.com', 'sec-fetch-site': 'cross-site', 'content-type': 'application/json' })
+  assert.equal(cross.statusCode, 403)
+  await call('POST', '/plugins/dsh-balance-monitor/config', { allowedHosts: null })
+  const restored = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.allowedHosts
+  assert.deepEqual(restored, [], 'null = 回默认')
+  return '显式列出才放行'
 })
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed} 通过 / ${failed} 失败`)

@@ -11,13 +11,18 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 
 | 项 | 之前 | 现在 |
 |---|---|---|
-| `officialPeak` | 只在代码里注释「可存进 state.json」，`loadStore()` **根本不读**它 → 改峰谷窗口/假期只能改源码 | 真的接通了：`state.json` 或设置页「显示 → 官方峰谷」都能改（逐字段覆盖 + 打字错保护），并进计价依据指纹 |
-| 状态变更路由 | 只靠「监听回环」当防护；任意网页的简单 POST 能删 key / 改类型 / 触发抓取 | 加跨站拦截面：`Sec-Fetch-Site` / `Origin` / `content-type` 三条判据（见第五节） |
+| `officialPeak` | 只在代码里注释「可存进 state.json」，`loadStore()` **根本不读**它 → 改峰谷窗口/假期只能改源码 | 真的接通了：`state.json` 或设置页「显示 → 官方峰谷」都能改（逐字段合并 + 打字错保护），并进计价依据指纹；`POST /config` 是**局部补丁**（没给的字段沿用现值），落盘时只写「与随包默认不同」的字段，所以点一次保存不会把当版假期表固化 |
+| 状态变更路由 | 只靠「监听回环」当防护；任意网页的简单 POST 能删 key / 改类型 / 触发抓取 | 加跨站拦截面：`Sec-Fetch-Site` 一级 + `Origin`/`Host` 兜底 + `content-type`（见第五节） |
+| DNS rebinding | 原来三条判据全是「同源」，rebinding 攻击下与合法请求逐字节相同 → 恶意页能读明文 key / 删 key / 读余额 | 加 **Host 白名单**（所有方法都查）：默认只认回环地址，反代 / 自定义域名写 `allowedHosts`（设置页「显示 → 访问控制」） |
+| 峰谷窗口输入 | ——（新功能自查发现） | 「清空窗口」解释成回默认而不是提交空数组（空数组 = 永不判峰 = 静默全谷价）；`5-5` 这类退化窗口当非法拒掉（原语义是全天高峰价）；超过 24 条在界面就拒（宿主上限 48，原来会静默截断） |
+| 假期输入 | ——（自查发现） | `2026-02-30` 这类「格式合法但不存在」的日期原来会被存下并且**永不生效**（`Date.parse` 会滚到 3-02），现在走回环校验剔掉 |
 | 密钥扫描配置 | 后端认 `scanCredentialsFile` / `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`，**前端没入口** | 设置页「显示 → 密钥扫描」补齐三个控件（含格式校验与回填） |
-| 多 key 明细 | 手填的引用没有 label → 侧栏只剩裸引用名 | 按名字派生短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`），卡片填的 label 仍优先 |
-| `mismatch` 告警 | 只说「与站方实扣不一致」，不给原因 | 宿主给结构化原因（差多少倍 / 方向 / 倍率是否报 1 / 逐模型反推区间），客户端按语言拼句子 |
+| 多 key 明细 | 手填的引用没有 label → 侧栏只剩裸引用名 | 按名字派生短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`），卡片填的 label 仍优先；派生标签**撞车**时退回带上引用名（`DEEPSEEK_API_KEY` 与 `API_KEY` 都派生成 `API KEY`） |
+| `mismatch` 告警 | 只说「与站方实扣不一致」，不给原因 | 宿主给结构化原因（差多少倍 / 方向 / 倍率是否报 1 / 逐模型反推区间），客户端按语言拼句子；倍率报 0 或官方价为 0 时那句省略，但**结论行不再整行消失** |
+| 账本健壮性 | 账本读失败静默按空账本启动，还会把 `days.json` 当天金额**覆盖成 0**（400 天汇总永久丢一天）；写失败时两个文件一起跳过；退出路径 flush 失败连 warn 都没有；防抖 2s + 定时器 `unref` 导致硬退出丢最后 2s；没有 `sessionId` 的调用共用一个去重桶（漏计真实调用） | 读失败留 warn 且日汇总不被覆盖、报告标明 `ledgerStale`；两个文件各写各的；退出路径与 `process.once('exit')` 都报错；无 `sessionId` 一律不去重；`extra` 为负时以汇总为准（不再把本/月/累计反减一次） |
+| 金额解析 | `toNumber('1e400')` 返回 `Infinity`；站点只回 balance 时 `computeSpend` 打「官方价 0.00 · 与实扣一致」（与「未定价 ≠ 0」相反） | 数值串也过有限性校验；没有 cost 数据时留 `null` 而不是 0 |
 | README | 路由表缺 `/keys`（四条方法）与 `/keys/reveal`；字段表缺 5 个键；「API Key 从不进响应体」与实现矛盾 | 补齐路由表与字段表，安全表述改成事实描述 |
-| 测试门槛 | 离线 289 用例 | 离线 **322** 用例（新增 officialPeak 归一、跨站拦截面、label 派生、mismatch 原因、密钥扫描配置） |
+| 测试门槛 | 离线 289 用例 | 离线 **341** 用例（新增 officialPeak 归一、跨站与 Host 拦截面、label 派生/去重、mismatch 原因、密钥扫描与白名单入口、账本损坏与去重边界） |
 
 ---
 
@@ -96,7 +101,7 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | **额度** | 逐供应商：类型 / 状态 / 倍率 / 峰谷 / 模型数 / 今日费用 / 备注（余额、套餐、到期时间、错误） |
 | **用量** | 累计输入 / 缓存（含缓存写入）/ 输出（含推理）/ 命中率；近 60 天柱状；今日按模型明细 |
 | **价格** | 计价依据指纹；来源等级分布（各等级条数）；**勾选参与计价的来源等级**（推荐组合一键还原）；「更新价格表」按钮；价目元数据（最近更新 / 条数 / 来源地址 / 数据出处） |
-| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
+| **显示** | 币种 / 符号 / 小数位 / 汇率 + 保存；账本保留（明细 / 日汇总天数）+ 独立保存；峰谷提醒两个勾选框（应用内 / 系统通知，勾选即写）；**密钥扫描**（读凭据文件引用名的开关 + 候选前缀 + 序号上限，独立保存）；**访问控制**（Host 白名单，反代 / 自定义域名部署用）；**官方峰谷**（启用开关 + 高峰窗口 `1-4,6-10` + 假期列表，独立保存） |
 
 **本月 / 累计为什么不靠账本**：账本只留最近几天原始记录（默认 7 天，供会话明细），所以另有
 `storages/dsh-balance-monitor/days.json` —— 每天把当日总额**覆盖式**写进去（幂等），默认保留 400 天。
@@ -252,6 +257,7 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   "deepseekKeyPrefixes": ["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
   "deepseekKeyMaxIndex": 9,
   "scanCredentialsFile": false,
+  "allowedHosts": ["panel.example.com", "192.168.1.10:3080"],
   "priceSources": ["official", "station", "manual"],
   "priceTable": { "models": { }, "providers": { }, "aliases": { } }
 }
@@ -265,10 +271,18 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `peakNotify`：峰谷提醒开关（`enabled` 侧栏横幅 / `system` 系统通知），设置页「显示」可改。
   两位都是**局部覆盖**：只提交一位不会把另一位带掉；两个都关 = 清掉这条配置。默认都关（不弹）。
   判定跟着侧栏 30s 轮询走，且只对**刚发生**的换档提醒（90s 内）——页面关着跨过的那次只记不报。
-- `officialPeak`：官方峰谷配置，**逐字段**覆盖随包默认表（第八节），设置页「显示 → 官方峰谷」可改。
+- `officialPeak`：官方峰谷配置，**逐字段**合并到随包默认表（第八节），设置页「显示 → 官方峰谷」可改。
   字段缺失或非法 → 该字段回落默认；`windows: []`（永不判峰）与 `holidays: []`（没有假期）是**有效值**，
   但「给了非空数组却一条都不合法」按打字错处理、回落默认（免得一个笔误丢掉整年假期）。
   改它会换计价依据指纹，**只影响之后的调用**。
+
+  > 两条与别的字段不同的规矩：①走 `POST /config` 是**局部补丁** —— 没给的字段沿用**当前生效值**
+  > （不是回默认），所以只改假期不会把「已关掉的峰谷」重新打开；`null` 才是「清除自定义、回默认」。
+  > ②落盘时只写**与随包默认不同**的字段：设置页点一次保存不会把当版假期表固化进 `state.json`，
+  > 以后随包更新假期表在这台机器上照样生效。
+- `allowedHosts`：额外允许的 `Host` 列表（`host[:port]`，小写，最多 20 条），设置页「显示 → 访问控制」可改。
+  默认空 = **只接受回环地址**（见第五节的 DNS rebinding 防护）；反代 / 自定义域名 / 局域网访问时把主机名写进来。
+  它只放宽 `Host` 判据，不影响跨站判据。
 - `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
   卡片上的密钥编辑区会自动维护它；侧栏余额 = 各把之和（币种不一致就不给总额）。
 - `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
@@ -309,7 +323,7 @@ POST   /plugins/dsh-balance-monitor/vision/apply { provider? }
 GET    /plugins/dsh-balance-monitor/report                 → { ok, data }（设置页「余额与费用」整页数据）
 POST   /plugins/dsh-balance-monitor/config { display?, budget?, retention?, peakNotify?, priceSources?,
                                              officialPeak?, scanCredentialsFile?, deepseekKeyPrefixes?,
-                                             deepseekKeyMaxIndex?, deepseekKeys? }
+                                             deepseekKeyMaxIndex?, deepseekKeys?, allowedHosts? }
                                                            → 白名单写入并回传新指纹
 POST   /plugins/dsh-balance-monitor/balance/refresh { provider? } → 强制刷新官方余额（两条路线）
 GET    /plugins/dsh-balance-monitor/prices                 → 价目状态（来源/条数/更新时间）
@@ -325,18 +339,39 @@ GET    /plugins/dsh-balance-monitor/                        → 一张说明页�
 
 这个 webserver 本身不鉴权（宿主不管认证），所以「本机任意进程」挡不住、也没打算挡
 （它能直接读凭据文件）。要挡的是**任意网页**：一个简单请求（无预检）就能把 POST 打进来，
-让插件替你删 key / 写 key / 改类型 / 触发抓取。所以 `POST` / `PUT` / `DELETE` / `PATCH`
-一律先过三条判据，任一条命中即拒：
+让插件替你删 key / 写 key / 改类型 / 触发抓取。拦住分两层：
 
-| 判据 | 响应 | 挡的是什么 |
-|---|---|---|
-| `Sec-Fetch-Site` 存在且不是 `same-origin` / `none` | `403` | 跨站请求（含同站子域） |
-| `Origin` 存在且与 `Host` 不同源（含字面量 `null`） | `403` | 跨源请求 / 沙箱 iframe / `file://` |
-| `content-type` 存在但不是 `application/json` | `415` | HTML 表单、`no-cors` fetch |
+**第一层：`Host` 白名单（所有方法都查）—— 挡 DNS rebinding**
+
+rebinding 攻击里，恶意页所在域名先解析到攻击者服务器（投递页面），随后改解析到 `127.0.0.1`，
+浏览器于是把 `fetch('/plugins/…')` 打到本机宿主上 —— 对浏览器来说这是**同源**请求，于是
+`Sec-Fetch-Site: same-origin`、`Origin` 与 `Host` 全是攻击者域名，跟合法请求**逐字节相同**，
+跨站那几条判据一条都不会命中。唯一能区分的就是 `Host`：
+
+| 情况 | 处理 |
+|---|---|
+| `Host` 去端口后是回环（`127.0.0.0/8`、`localhost`、`[::1]`） | 放行 |
+| `Host` 不带（HTTP/1.0、脚本、测试桩） | 放行（浏览器一定会带，所以不给浏览器留口子） |
+| 其它 → 在 `allowedHosts` 里显式列过 | 放行 |
+| 其它 → 没列过 | `403`，错误信息里带上该 host 与怎么加白名单 |
+
+**第二层：状态变更路由（`POST` / `PUT` / `DELETE` / `PATCH`）—— 挡跨站请求**
+
+| 级别 | 判据 | 响应 | 挡的是什么 |
+|---|---|---|---|
+| ① 有 `Sec-Fetch-Site`（现代浏览器必有） | 不是 `same-origin` / `none` | `403` | 跨站请求（含同站子域）；这个头由浏览器写，页内脚本改不了 |
+| ② 没有该头（老浏览器） | `Origin` 存在且与 `Host` 不同源（含字面量 `null`） | `403` | 跨源请求 / 沙箱 iframe / `file://` |
+| 补充（两级都要过） | `content-type` 存在但不是 `application/json` | `415` | HTML 表单、`no-cors` fetch |
+
+第②级为什么只在没有 `Sec-Fetch-Site` 时跑：`Origin` 是浏览器按**页面 URL**填的，而 `Host`
+在反向代理后面可能被改写（nginx `proxy_pass` 的默认行为就是把 Host 写成上游地址）。
+那种部署下「页面同源、Host 却是 `127.0.0.1:3080`」是正常现象，无条件比对会把插件自己的 UI
+全挡掉（所有写操作 403）。两级都过不了只剩「老浏览器 + 反代改写 Host」，那种环境请让反代
+保留原始 `Host`。
 
 三个头**都不带**时放行（`curl`、脚本、老客户端）—— 那不是浏览器发起的跨站请求，拦它只会把
-命令行用法挡在门外。GET 一律不校验。所以从脚本调这些路由时，**带上
-`content-type: application/json`** 最稳妥（不带也能过，但带上就走正规路径）。
+命令行用法挡在门外。GET 不过第二层（它不该有副作用），但**要过第一层**（否则余额/花费能被
+rebinding 读走）。所以从脚本调这些路由时，**带上 `content-type: application/json`** 最稳妥。
 
 没有用 typert/remote：那条路要求把客户端从 TS 源码构建出 `$mount` 产物，本插件手写客户端模块、零构建步骤。
 
@@ -375,18 +410,18 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 322 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 341 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
-$NODE test/pricing.test.mjs          # 档位与计价纯函数（79 个用例）：官方峰谷（含未来切换点）、officialPeak 归一、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
+$NODE test/pricing.test.mjs          # 档位与计价纯函数（83 个用例）：官方峰谷（含未来切换点）、officialPeak 归一与假期回环校验、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
 $NODE test/litellm-prices.test.mjs   # 站方口径价目（17 个用例，fetch 全部打桩）：字段映射、渠道条目过滤、长上下文档、抓取链四种形态、合并位置
 $NODE test/credentials-refs.test.mjs # 凭据引用名（8 个用例）：refs 段解析、只看名字不读值
-$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（40 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数
+$NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（41 个用例）：按天/供应商/会话/模型加总、日汇总幂等与裁剪、保留期归一、预算占比、三级金额不重复计数、账本落后时的兜底
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
-$NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（34 个用例）：解析、花费、口径分歧的结构化原因
+$NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站拦截面 + 手工喂假流验证记账（87 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（30 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 账本损坏 + 手工喂假流验证记账（95 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（33 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -396,7 +431,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 322 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 341 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -428,7 +463,7 @@ lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
 lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
-test/*.mjs            九套用例，离线门槛 322 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、跨站拦截面与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 341 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 
@@ -459,23 +494,29 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
    系统通知要浏览器授权（被拒就只剩横幅）。要做秒级提醒得在宿主侧挂定时器，本插件不这么做。
 7. **手工新增供应商时卡片不显示** —— 上游槽位分发时机所致，见第三节。
 8. **`GET /state` 会阻塞到本轮探测完成 + 补模态写盘完成**（首次约 1–2 秒，之后命中缓存），没做流式推送。
-9. **跨站拦截面只挡浏览器**（0.7.0，见第五节）：`Sec-Fetch-Site` / `Origin` / `content-type`
-   三条判据都靠浏览器自己带的头，所以本机脚本、`curl`（只要不带这些头）照样能打这些路由。
+9. **拦截面只挡浏览器**（0.7.0，见第五节）：`Host` 白名单与 `Sec-Fetch-Site` / `Origin` /
+   `content-type` 都靠浏览器自己带的头，所以本机脚本、`curl`（不带这些头）照样能打这些路由。
    想连本地进程也挡住，得让宿主 webserver 支持鉴权 —— 那不在本插件的能力范围内。
+10. **账本文件坏掉时明细必丢**：`ledger.json` 读不出来（截断 / 权限 / 被占用）会按空账本启动，
+   这时插件**留 warn、不覆盖 `days.json`**、并在报告的 `totals.today` 上标 `ledgerStale: true` ——
+   金额（今日 / 本月 / 累计）来自日汇总，仍然对；但**今日会话 / 按模型 / 逐供应商明细**是真的没了
+   （它们只存在账本里）。修好文件或等新调用进来就恢复。
 
 ### 未做（能补，还没补）
 
-10. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
+11. **并发按单进程假设**：写入只有防抖 + `tmp` 写 + `rename` 原子替换（`lib/index.js:320`），
     **没有跨进程文件锁**。同一台机器跑两个宿主实例同时记账，理论上会互相覆盖。
-11. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
+12. **界面文案**按浏览器语言在 zh/en 之间二选一，还没有接宿主的 locale 服务
     （接错 API 会把整张卡片打崩，所以先用防御式探测）。
-12. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
+13. **补图片只补「没声明过」的模型**：显式勾成纯文本的模型要靠「立即补图片」或手动勾。
     自动补全的触发点是「设置 → 模型」页面渲染出本插件的卡片（也就是 `/state` 被访问）——
     不开这个页面时不会后台定时扫。写盘失败会进入 30s 冷却，不会每次请求都撞同一堵墙。
-13. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
-14. **峰谷「窗口 / 假期」没有填错时的二次确认**：界面只做格式校验（`1-4,6-10` 这种写法），
-    把 `1-4` 写成 `1-14` 这种「格式合法但语义不对」的值会照收 —— 值本身是合法配置，
+14. **60s 缓存**：手动「刷新」立即生效；自动刷新最坏滞后 60s。
+15. **峰谷「窗口 / 假期」没有填错时的二次确认**：界面只做格式与范围校验（`1-4,6-10`、起止不同、
+    最多 24 条），把 `1-4` 写成 `1-14` 这种「格式合法但语义不对」的值会照收 —— 值本身是合法配置，
     插件不替用户判断意图。
+16. **无 `sessionId` 的调用不去重**：宿主内部调用不一定带会话 id，那种情况一律放行（宁可多记一次
+    也不漏账）。代价是「包装路由同一次调用到达两次」在这种调用上**可能**被记两次 —— 两害相权取其轻。
 
 ---
 
@@ -518,14 +559,19 @@ research/             选型阶段的调研与实测报告（FEASIBILITY.md、DE
 ```
 
 - `windows` 是 **UTC 小时**、半开区间 `[start, end)`；`{1,4}`+`{6,10}` ＝ 北京 09:00–12:00、14:00–18:00。
-  设置页把它写成 `1-4,6-10` 这种紧凑形式，保存前解析回数组（格式不对就不让保存）。
+  设置页把它写成 `1-4,6-10` 这种紧凑形式，保存前解析回数组（格式/范围不对就不让保存，最多 24 条；
+  宿主侧还有一条 48 条的上限做兜底 —— 界面先拒，就不会出现「配了 30 条实际只生效 48 条」之外的静默截断）。
 - `holidays` 是北京日历日，**每年要人工更新** —— 0.7.0 起不用改源码了：设置页「显示 → 官方峰谷」
   的假期输入框（逗号分隔）或 `state.json` 的 `officialPeak.holidays` 都能改。
-  调休上班的周末仍按周末判谷。
+  只认**真实存在**的日期（`2026-02-30` 这种「格式合法但不存在」的会被剔掉 —— 留着它也不生效，
+  因为 `beijingDayKey()` 永远不会产出那一天）。调休上班的周末仍按周末判谷。
 - `effectiveAt` 之前的调用不套峰谷，`legacyBoundary` 之前按价表的 `legacyBase`（历史正确性）。
 - 归一规则（`lib/pricing.js` 的 `normalizeOfficialPeak`）：字段缺失/非法 → 该字段回落默认；
   `windows: []`（永不判峰）与 `holidays: []`（没有假期）是有效值；给了非空数组却一条都不合法
   按打字错处理、回落默认。`enabled: false` 或空窗口会让相位块整体消失（侧栏不显示倒计时条）。
+- 窗口的两条边界：**跨午夜**（`start > end`，如 `22-2`）合法；**退化窗口**（`start === end`，
+  如 `5-5`）当非法丢掉 —— 否则会命中跨午夜兼容分支（`hour >= 5 || hour < 5` 恒真）变成
+  **全天高峰价**，是个静默改价的坑。
 
 **展示侧**（都不参与计价，只影响界面）：
 
