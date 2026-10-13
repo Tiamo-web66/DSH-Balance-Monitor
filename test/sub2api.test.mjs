@@ -208,6 +208,48 @@ test('实扣更低时方向相反（促销/折扣）', () => {
   assert.equal(reason.rateIsUnity, false)
   assert.equal(reason.modelRateCount, 0, '没有逐模型明细时给 0，界面据此不显示「逐模型不一致」')
 })
+test('完全没有 cost 数据 → 不给 0，也不说「与实扣一致」', () => {
+  // 站方只回 balance / model_stats 里没有 cost 时会命中：`[].reduce(...)` 是 0，
+  // 而 0 是有限数 —— 照原样会打出「官方价 0.00 × 0.09 = 0.00 · 与实扣一致」，
+  // 正好与「未定价 ≠ 0」的原则相反。
+  const empty = parseUsage({ mode: 'unrestricted', unit: 'USD', balance: 29.92 })
+  const billing = parseBilling({ object: 'sub2api.key_billing', effective_rate_multiplier: 0.09, resolved_rate_multiplier: 0.09, peak_rate_enabled: false })
+  const spend = computeSpend(empty, billing)
+  assert.equal(spend.officialCost, null)
+  assert.equal(spend.actualCost, null)
+  assert.equal(spend.byMultiplier, null)
+  assert.equal(spend.delta, null)
+  assert.equal(spend.mismatch, false)
+  return '空数据 → null，不是 0'
+})
+test('数值字符串也要有限性：1e400 不算「解析成功」', () => {
+  assert.equal(Number('1e400'), Infinity, '前提：Number 会溢出成 Infinity')
+  assert.equal(toNumber('1e400'), undefined)
+  assert.equal(toNumber('9'.repeat(400)), undefined)
+  assert.equal(toNumber('-1e400'), undefined)
+  assert.equal(toNumber('1e3'), 1000, '正常科学计数法照认')
+})
+test('倍率报 0 / 官方价为 0 时：factor 给 null，但原因仍然存在（别把整行吞掉）', () => {
+  const zeroRate = computeSpend(
+    parseUsage({ mode: 'unrestricted', unit: 'USD', usage: { total: { cost: 100, actual_cost: 9 } } }),
+    parseBilling({ object: 'sub2api.key_billing', effective_rate_multiplier: 0, resolved_rate_multiplier: 0, peak_rate_enabled: false }),
+  )
+  assert.equal(Number.isFinite(zeroRate.mismatchReason.factor), false, 'Infinity 会被 JSON 变成 null，提前挡掉')
+  assert.equal(zeroRate.mismatchReason.factor, null)
+  assert.equal(zeroRate.mismatchReason.direction, null)
+  assert.equal(zeroRate.mismatch, true)
+
+  // 官方价 0（反推不出倍率）时原来整条 reason 是 null → 界面第三行静默消失
+  const zeroCost = computeSpend(
+    parseUsage({ mode: 'unrestricted', unit: 'USD', usage: { total: { cost: 0, actual_cost: 5 } } }),
+    parseBilling({ object: 'sub2api.key_billing', effective_rate_multiplier: 0.09, resolved_rate_multiplier: 0.09, peak_rate_enabled: false }),
+  )
+  assert.equal(zeroCost.mismatch, true)
+  assert.notEqual(zeroCost.mismatchReason, null, '算不出倍数也要给结论，不能整条丢弃')
+  assert.equal(zeroCost.mismatchReason.factor, null)
+  assert.equal(zeroCost.mismatchReason.percent, 100)
+  return 'factor=null · reason 仍在'
+})
 test('缺 total 时回落到 today 并标注 period', () => {
   const onlyToday = parseUsage({
     mode: 'quota_limited', unit: 'USD',
