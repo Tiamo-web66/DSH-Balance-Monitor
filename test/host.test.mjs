@@ -259,18 +259,19 @@ function makeRes() {
   }
   return res
 }
-async function callOn(route, method, path, body) {
+async function callOn(route, method, path, body, headers) {
   const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), 'utf8')
   const req = {
     method, url: path,
+    headers: headers ?? {},
     async *[Symbol.asyncIterator]() { if (payload !== null) yield payload },
   }
   const res = makeRes()
   await route.handler(req, res)
   return res
 }
-async function call(method, path, body) {
-  return callOn(routes[0], method, path, body)
+async function call(method, path, body, headers) {
+  return callOn(routes[0], method, path, body, headers)
 }
 
 let passed = 0
@@ -308,6 +309,62 @@ await test('坏 JSON 400', async () => {
   const res = makeRes()
   await routes[0].handler(req, res)
   assert.equal(res.statusCode, 400)
+})
+
+console.log('\n[跨站拦截面：状态变更路由不许被任意网页打]')
+await test('Sec-Fetch-Site: cross-site → 403（且副作用没发生）', async () => {
+  const autoOf = async () => (await call('GET', '/plugins/dsh-balance-monitor/state')).json.state.providers
+    .find(row => row.provider === 'wbfd').image.auto
+  assert.equal(await autoOf(), true, '前置：wbfd 的自动补图片默认开')
+  const res = await call('POST', '/plugins/dsh-balance-monitor/vision/auto',
+    { provider: 'wbfd', enabled: false }, { 'sec-fetch-site': 'cross-site', 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 403)
+  assert.match(res.json.error, /跨站/)
+  assert.equal(await autoOf(), true, '被拒的请求不该改开关')
+  return res.json.error
+})
+await test('Sec-Fetch-Site: same-site（子域）也拒', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/refresh',
+    { provider: 'walk-grok' }, { 'sec-fetch-site': 'same-site' })
+  assert.equal(res.statusCode, 403)
+})
+await test('Origin 与 Host 不同源 → 403', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config',
+    { budget: { enabled: true } }, { origin: 'https://evil.example', host: '127.0.0.1:3080', 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 403)
+  assert.match(res.json.error, /跨源/)
+})
+await test('Origin 是字面量 null（沙箱 iframe / file://）→ 403', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config',
+    { budget: { enabled: true } }, { origin: 'null', host: '127.0.0.1:3080', 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 403)
+})
+await test('Origin 与 Host 同源 → 放行', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config',
+    {}, { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'content-type': 'application/json' })
+  assert.equal(res.statusCode, 200)
+})
+await test('content-type 是表单类型 → 415（HTML 表单打不进来）', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config',
+    { budget: { enabled: true } }, { 'content-type': 'application/x-www-form-urlencoded' })
+  assert.equal(res.statusCode, 415)
+  assert.match(res.json.error, /application\/json/)
+})
+await test('no-cors fetch 的 text/plain 也拒；带 charset 的 JSON 放行', async () => {
+  const plain = await call('POST', '/plugins/dsh-balance-monitor/config', {}, { 'content-type': 'text/plain;charset=UTF-8' })
+  assert.equal(plain.statusCode, 415)
+  const json = await call('POST', '/plugins/dsh-balance-monitor/config', {}, { 'content-type': 'application/json; charset=utf-8' })
+  assert.equal(json.statusCode, 200)
+})
+await test('三个头都不带（curl / 脚本）→ 放行，命令行用法不受影响', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', {})
+  assert.equal(res.statusCode, 200)
+  const hostile = await call('POST', '/plugins/dsh-balance-monitor/keys/reveal', { provider: 'deepseek-official', ref: 'DEEPSEEK_API_KEY' })
+  assert.equal(hostile.statusCode, 200, '明文路由对本地进程本来就不设防（凭据文件本机可读）')
+})
+await test('GET 不带这些头也照常（拦截面只管状态变更）', async () => {
+  const res = await call('GET', '/plugins/dsh-balance-monitor/state', undefined, { 'sec-fetch-site': 'cross-site' })
+  assert.equal(res.statusCode, 200)
 })
 
 console.log('\n[GET /state：首次自动探测]')
@@ -844,6 +901,61 @@ await test('POST /config：峰谷提醒是局部覆盖，两个都关就清掉�
   return '局部覆盖 · 都关即清空'
 })
 
+await test('POST /config：officialPeak 接通（窗口/假期可配、停用生效、依据指纹随之变化）', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const before = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.ok(Array.isArray(before.officialPeak?.holidays) && before.officialPeak.holidays.length > 0, '报表要带上峰谷配置')
+  assert.notEqual(before.peak, null, '默认峰谷是开着的（相位块存在）')
+  const baseBasis = before.prices.basisId
+
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    officialPeak: { windows: [{ start: 2, end: 5 }], holidays: ['2026-12-25'] },
+  })
+  assert.deepEqual(res.json.data.officialPeak.windows, [{ start: 2, end: 5 }])
+  assert.deepEqual(res.json.data.officialPeak.holidays, ['2026-12-25'])
+  assert.equal(res.json.data.officialPeak.effectiveAt, before.officialPeak.effectiveAt, '没给的字段回落默认')
+  assert.notEqual(res.json.data.basisId, baseBasis, '改峰谷 → 新依据指纹（历史不重算）')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).officialPeak.windows, [{ start: 2, end: 5 }], '要落盘')
+  assert.deepEqual((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.officialPeak.holidays, ['2026-12-25'])
+
+  // 停用峰谷：报表与侧栏的相位块整体消失（倒计时条不再出现）
+  const off = await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: { enabled: false } })
+  assert.equal(off.json.data.officialPeak.enabled, false)
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.peak, null)
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.peak, null)
+
+  // 清掉自定义 → 回默认（相位块与指纹都恢复）
+  const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: null })
+  assert.equal(cleared.json.data.officialPeak.enabled, true)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).officialPeak, undefined, '回默认 = 文件里不留一条')
+  assert.equal(cleared.json.data.basisId, baseBasis, '回默认 = 回原指纹')
+  assert.notEqual((await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.peak, null)
+  return '窗口/假期可配 · 停用即无相位块'
+})
+
+await test('POST /config：officialPeak 垃圾输入不写坏配置', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const res = await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: 'yesterday' })
+  assert.equal(res.json.data.officialPeak.enabled, true)
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).officialPeak, undefined, '非对象 = 没配')
+  return '非对象即清空'
+})
+
+await test('officialPeak 随 state.json 重载（loadStore 认这个键，非法项被剔）', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const state = JSON.parse(readFileSync(file, 'utf8'))
+  state.officialPeak = { holidays: ['2026-12-25', '2026/12/26', '2026-12-25'], windows: [{ start: 0, end: 1 }, { start: 9, end: 99 }] }
+  writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  mod.apply(makeCtx({ providers, settings }))
+  const report = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.deepEqual(report.officialPeak.holidays, ['2026-12-25'], '非法日期剔除 + 去重')
+  assert.deepEqual(report.officialPeak.windows, [{ start: 0, end: 1 }], '越界窗口整条丢掉')
+  // 清掉，别给后面的用例留状态
+  await call('POST', '/plugins/dsh-balance-monitor/config', { officialPeak: null })
+  return '重载 · 非法项剔除'
+})
+
+
 await test('保留期也随 state.json 重载（loadStore 认这个键）', async () => {
   // 直接改磁盘上的 state.json，再重新 apply —— 走的是真实的加载路径
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
@@ -959,6 +1071,24 @@ await test('清空 key 列表 → 回到用路线自己的 apiKeyEnv（单把）
   return '回落到 DEEPSEEK_API_KEY'
 })
 
+await test('手填的引用没有 label → 派生短标签（卡片填的 label 优先）', async () => {
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2'] })
+  const derived = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data
+    .balances.find(item => item.provider === 'deepseek-official')
+  assert.deepEqual(derived.keys.map(k => k.label), ['API KEY', 'API KEY 2'], '侧栏明细不该只剩裸引用名')
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: [{ ref: 'DEEPSEEK_API_KEY', label: '主力' }, { ref: 'DEEPSEEK_API_KEY_2' }],
+  })
+  const custom = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data
+    .balances.find(item => item.provider === 'deepseek-official')
+  assert.deepEqual(custom.keys.map(k => k.label), ['主力', 'API KEY 2'], '自己填的 label 优先')
+  const list = (await call('GET', '/plugins/dsh-balance-monitor/keys?provider=deepseek-official')).json.data
+  assert.equal(list.keys.find(item => item.ref === 'DEEPSEEK_API_KEY').label, '主力', 'GET /keys 也带派生标签')
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  return 'API KEY · API KEY 2 · 自定义优先'
+})
+
+
 await test('方案 A：候选名探测（describe）列出可加的 key，不读值', async () => {
   const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
   const discovery = report.keyCandidates
@@ -1072,6 +1202,33 @@ await test('scanCredentialsFile: false → 退回纯候选名探测（不碰凭�
   assert.ok(discovery.foundRefs.includes('DEEPSEEK_API_KEY'), '候选名探测照旧')
   await call('POST', '/plugins/dsh-balance-monitor/config', { scanCredentialsFile: true })
   return '已退回候选名探测'
+})
+
+await test('GET /report 下发密钥扫描配置（界面要能回填与编辑）', async () => {
+  const before = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
+  assert.equal(before.scanCredentialsFile, true, '默认开')
+  assert.deepEqual(before.prefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'], '默认前缀')
+  assert.equal(before.maxIndex, 9, '默认序号上限')
+  // 三个键一起写 → 回传的就是归一后的值（前缀去重、非法项被剔、上限夹在 1–50）
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    scanCredentialsFile: false,
+    deepseekKeyPrefixes: ['MY_KEY', 'MY_KEY', 'bad prefix'],
+    deepseekKeyMaxIndex: 3,
+  })
+  assert.deepEqual(saved.json.data.keyDiscovery, { scanCredentialsFile: false, prefixes: ['MY_KEY'], maxIndex: 3 })
+  const after = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
+  assert.deepEqual(after, saved.json.data.keyDiscovery, '报表与 /config 回传要一致')
+  // 上限越界 → 清掉该项（回落默认 9）；空前缀列表 → 也回落默认
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeyMaxIndex: 999, deepseekKeyPrefixes: [] })
+  assert.equal(junk.json.data.keyDiscovery.maxIndex, 9)
+  assert.deepEqual(junk.json.data.keyDiscovery.prefixes, ['DEEPSEEK_API_KEY', 'DEEPSEEK_KEY'])
+  // 收尾：回到默认（前缀清空 = 用默认；上限传 null = 清掉；文件扫描重新打开）
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    scanCredentialsFile: true, deepseekKeyPrefixes: [], deepseekKeyMaxIndex: null,
+  })
+  const restored = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.keyDiscovery
+  assert.deepEqual(restored, before, '收尾后应完全回到默认')
+  return '回填 · 归一 · 越界回落'
 })
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed} 通过 / ${failed} 失败`)
