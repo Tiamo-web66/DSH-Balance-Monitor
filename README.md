@@ -32,6 +32,22 @@ DeepSeek Harness 插件：在**设置 → 模型**的每张供应商卡片里加
 | 提醒弹窗 | 塞在侧栏里的一行 | 浮层（`position: fixed`），侧栏与设置页预览**共用同一个组件** —— 预览的意义就是「所见即实际」 |
 | 侧栏模型花费卡片 | 没有 | `modelCard` 配置：开关 / 默认展开 / 记住展开状态 / 显示 Token / 显示费用占比条 / 默认周期（今日·近 90 天）/ 模型行数 1–10 / 卡片位置（底部·顶部）。**收起时标题行给 Top-1**，展开给 Top-N + 占比条；行尾对未定价的调用标 ⚠ |
 
+### 0.8.0 · T3/T4：会话三块 + 历史数据
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 本会话费用 | 没有 | 输入区下方 / 会话标题栏（位置可配），给 金额 · 调用数 · token · 命中率（可关）· 未定价条数；宿主没给 `sessionId` 就不渲染 |
+| 子代理归属 | 没有 | `includeSubagent`：打开后算 **自身 + 父会话 id 指向它的调用**。归属来自宿主在调用事件里给的 `parentSessionId` —— **没给就只统计本会话**，并在行尾标「⚠ 宿主未提供子代理归属」，不假装算过（`/session` 的 `subagentSupported` 说的就是这件事） |
+| 额度横条 | 没有 | 输入框上方一排 chip：今日金额 / 峰谷档位与倒计时 / 官方余额（可关）。点一下刷新。尊重「隐藏今日消耗 / 隐藏官方余额」 |
+| 右下角角标 | 没有 | 今日金额 + 峰谷档位（可选 Top-1 模型） |
+| 历史数据 | 没有 | **清除全部历史**（两步确认 + 确认串，明细与日汇总一起清，不可恢复）与**导入安装前历史**（能力探测：如实报扫到几份日志、为什么导不进来） |
+
+**取舍（必须说清楚）**：T4 的「导入」只做**能力探测**，不做回放 / 重定价。唯一可能的来源是宿主会话日志
+（`~/.dsh/sessions/<项目>/<会话>/session.jsonl.zstd`），实测是**分帧 zstd**、且没有公开的用量字段 schema
+（Node v24 的 `zstdDecompressSync` 只解得出会话头一行）。更重要的是：**回放会推翻本插件的硬规定**
+「依据在入账时冻结、之后只加总，不重算历史」——一旦按当前价表回推旧调用，历史金额就会随改价变动，
+与官方账单对不上时也说不清是谁的问题。所以这里宁可不做，也不给出一个会漂的金额。
+
 ### 0.7.0：officialPeak 接通 + 拦截面 + 一轮 bug 收口
 
 | 项 | 之前 | 现在 |
@@ -351,6 +367,10 @@ API Key 对外的**只读**痕迹只有 `hasKey: true/false`。但要说清楚�
 
 ```
 GET    /plugins/dsh-balance-monitor/state                  → { ok, state }
+POST   /plugins/dsh-balance-monitor/history/clear { confirm: "clear-all-history" }
+                                                           → 清空明细与日汇总（不带确认串则 400，且不动任何数据）
+POST   /plugins/dsh-balance-monitor/history/import
+                                                           → 导入安装前历史的能力探测（不做回放）
 GET    /plugins/dsh-balance-monitor/session?sessionId=…&includeSubagent=0|1
                                                            → 该会话今日用量（自身 / 子代理 / 合计）
 GET    /plugins/dsh-balance-monitor/sidebar                → { ok, data }（余额/今日/峰谷相位）
@@ -448,7 +468,7 @@ function brandString(value) { return value }   // brand 只存在于编译期
 ```bash
 NODE="C:/Users/Administrator/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# ── 门槛：全部不出网（离线 377 个用例 / 9 套）────────────────────────────
+# ── 门槛：全部不出网（离线 392 个用例 / 9 套）────────────────────────────
 npm test                # = npm run test:offline
 # 单独跑某一套：
 $NODE test/pricing.test.mjs          # 档位与计价纯函数（83 个用例）：官方峰谷（含未来切换点）、officialPeak 归一与假期回环校验、站方倍率复算、credits、未定价语义、价表命中、来源等级策略
@@ -458,8 +478,8 @@ $NODE test/usage-ledger.test.mjs     # 用量账本 + 侧栏/报表聚合（45 �
 $NODE test/balance.test.mjs          # DeepSeek 官方余额（17 个用例，fetch 全部打桩）：域名白名单、金额解析、两条路线、错误形态
 $NODE test/sub2api.test.mjs --offline # Sub2Api 适配器纯函数（37 个用例）：解析、花费、口径分歧的结构化原因、溢出的数值字符串
 $NODE test/vision.test.mjs           # 模态补全纯函数（10 个用例）
-$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（100 个用例，全程离线）
-$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（60 个用例）
+$NODE test/host.test.mjs             # host 半身：假 ctx + 打桩 fetch，驱动全部同源路由（含 /report、/config、/prices、/keys）+ 跨站与 Host 拦截面 + 界面偏好 + 账本损坏 + 手工喂假流验证记账（104 个用例，全程离线）
+$NODE test/client-page.test.mjs      # 客户端半身：假 React 把设置页五个分页 + 侧栏**真的渲染一遍**，并点击按钮验证打到了宿主路由（69 个用例）
 
 # ── 联网：真实站，**不是门槛**（要能连上那 4 家站）──────────────────────
 npm run test:net           # 严格：任一站不可达即退出码 1
@@ -469,7 +489,7 @@ npm run test:all           # 离线 + 严格联网
 
 **联网用例的失败分两类，别混**：断言失败（倍率被站方改了、模型清单空了）才是代码/口径问题；
 传输层不可达是环境问题，`--allow-unreachable` 会把它降成 `SKIP` 并在汇总里标出来。
-所以**别把 `npm test` 换成联网版**：离线 377 个用例才是唯一稳定的回归门槛。
+所以**别把 `npm test` 换成联网版**：离线 392 个用例才是唯一稳定的回归门槛。
 
 `test/host.test.mjs` 里的假 settings 服务**照 `@deepseek-ai/dsh-settings` 的真实契约搭**：
 `describe()` 返回带修订号的描述符、`mutate(ns, ops, expected)` 按 `applyPathOp` 的路径语义落值并在修订号对不上时抛
@@ -501,7 +521,7 @@ lib/vision.js         模态补全纯函数：判定 image 声明状态、算缺
 lib/index.js          host 半身：枚举供应商、探测、补模态、包裹 llm/stream 记账、注册同源路由（含 /report、/config、/prices、/keys）、状态变更路由的跨站拦截面
 lib/client.js         客户端半身：手写模块，只 require('react')，注册「设置卡片」+「侧栏底部」+「设置页：余额与费用」三个槽位
 lib/credentials-refs.js 凭据文件里 `refs:` 段的**键名**解析（只取名字、不读值；失败即空，不抛）
-test/*.mjs            九套用例，离线门槛 377 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
+test/*.mjs            九套用例，离线门槛 392 个：pricing / litellm-prices / credentials-refs / usage-ledger / balance / vision（纯函数）+ sub2api（纯函数 + 真实站联网）+ host（离线驱动路由、拦截面、账本损坏与假流）+ client-page（假 React 真渲染）
 research/             选型阶段的调研与实测报告（FEASIBILITY.md、DESIGN-provider-types.md）+ 两个价表导入器 + 四个探测脚本
 ```
 

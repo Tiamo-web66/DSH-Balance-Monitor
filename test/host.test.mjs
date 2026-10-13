@@ -1527,6 +1527,55 @@ await test('GET /session：自身 / 子代理 / 合计，子代理要显式开',
   return 'self 1 + 子代理 1 = 2 · 未知会话 0 · 缺参 400'
 })
 
+console.log('\n[历史数据：清空 / 导入探测]')
+// 放在最后：清空是真的破坏性操作，会把这之前的账清掉（后面的用例不再依赖历史数据）
+await test('POST /history/clear 不带确认 → 400，且一个字节都不动', async () => {
+  const dir = join(sandbox, 'storages', 'dsh-balance-monitor')
+  const before = JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8'))
+  const refused = await call('POST', '/plugins/dsh-balance-monitor/history/clear', {})
+  assert.equal(refused.statusCode, 400)
+  assert.ok(String(refused.json.error).includes('显式确认'), `要提示怎么确认：${refused.json.error}`)
+  const after = JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8'))
+  assert.deepEqual(after, before, '被拒绝时不该动任何数据')
+  assert.equal((await call('POST', '/plugins/dsh-balance-monitor/history/clear', { confirm: 'clear-all' })).statusCode, 400,
+    '确认串写错也算拒绝')
+  return '400 · 数据未动'
+})
+await test('POST /history/clear 带确认 → 内存与两个文件一起清空，报表归零', async () => {
+  const dir = join(sandbox, 'storages', 'dsh-balance-monitor')
+  const before = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.ok(before.totals.all.calls > 0, '前置：累计应有调用')
+  const cleared = await call('POST', '/plugins/dsh-balance-monitor/history/clear', { confirm: 'clear-all-history' })
+  assert.equal(cleared.statusCode, 200)
+  assert.ok(cleared.json.data.ledgerDays > 0, `要报清掉多少天：${JSON.stringify(cleared.json.data)}`)
+  assert.ok(cleared.json.data.records > 0, '要报清掉多少条')
+  assert.deepEqual(cleared.json.data.writeFailed, [], '落盘要成功（失败必须报出来）')
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).days, {}, '账本文件清空')
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'days.json'), 'utf8')).days, {}, '日汇总文件清空')
+  // 关键是**内存也清了**：只删文件的话报表还是旧的，下一次防抖写入还会把数据写回去
+  const after = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(after.totals.all.calls, 0, '累计归零')
+  assert.equal(after.totals.today.calls, 0, '今日归零')
+  assert.equal(after.sessions.length, 0, '会话明细归零')
+  assert.equal(after.modelsHistory.rows.length, 0)
+  // 清空后新记一笔 → 账上只有这一笔
+  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 's-after-clear', inputTokens: 1_000_000 })
+  const fresh = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(fresh.totals.today.calls, 1, '清空后新记的一笔要在账上')
+  assert.equal(fresh.totals.all.calls, 1)
+  return `清掉 ${cleared.json.data.ledgerDays} 天 / ${cleared.json.data.records} 条 · 之后从零开始`
+})
+await test('POST /history/import：只做能力探测（available=false + 原因），不做回放', async () => {
+  const probe = (await call('POST', '/plugins/dsh-balance-monitor/history/import', {})).json.data
+  assert.equal(probe.available, false, '本版本不导入：格式未验证，宁可不做')
+  assert.ok(typeof probe.reason === 'string' && probe.reason.length > 0, `要给原因：${JSON.stringify(probe)}`)
+  assert.ok(typeof probe.sessionsRoot === 'string', '要告诉用户去哪找日志')
+  assert.equal(typeof probe.zstd, 'boolean', '要报 zstd 是否可用')
+  assert.equal(typeof probe.sessionFiles, 'number')
+  assert.equal(typeof probe.projects, 'number')
+  return `${probe.sessionFiles} 份日志 · zstd=${probe.zstd} · ${String(probe.reason).slice(0, 24)}…`
+})
+
 console.log('\n[Host 白名单：挡 DNS rebinding]')
 await test('rebinding 头（同源 + 恶意域名）→ 403，读和写都挡住', async () => {
   // 攻击形态：恶意页所在的域名重新解析到 127.0.0.1，浏览器于是认为这是**同源**请求：

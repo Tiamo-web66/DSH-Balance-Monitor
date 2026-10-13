@@ -308,6 +308,8 @@ globalThis.fetch = async (url, init) => {
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys') ? { ok: true, data: KEYS }
+    : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
+    : path.includes('/history/clear') ? { ok: true, data: { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
     : path.includes('/session?') ? { ok: true, data: sessionFixture(path.includes('includeSubagent=1')) }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
@@ -580,10 +582,10 @@ test('切到「用量」页：token 汇总 + 26 周热力图 + 按模型统计�
 })
 test('按模型统计：默认展开，可折叠，双档 + 四种排行真的按指标重排', () => {
   assert.ok(render(mount(CostPage)).includes('按模型统计'), '入口应在')
-  assert.ok(render(mount(CostPage)).includes('全部历史'), '默认应展开（隐藏入口等于没有）')
+  assert.ok(render(mount(CostPage)).includes('排行依据'), '默认应展开（隐藏入口等于没有）')
   // 按钮是开关：折叠 → 内容收起 → 再展开
   assert.ok(clickMatch(CostPage, '按模型统计'), '应能折叠')
-  assert.ok(!render(mount(CostPage)).includes('全部历史'), '折叠后内容应收起')
+  assert.ok(!render(mount(CostPage)).includes('排行依据'), '折叠后内容应收起')
   assert.ok(clickMatch(CostPage, '按模型统计'), '应能再展开')
   const opened = mount(CostPage)
   const openedHtml = render(opened)
@@ -1297,6 +1299,50 @@ await (async () => {
     SIDEBAR.corner = saved.corner
   }
   await reloadSidebar()
+})()
+
+console.log('\n[历史数据：导入探测 / 清除（两步确认）]')
+await (async () => {
+  assert.ok(clickText(mount(CostPage), '用量'), '应能切到用量页')
+  const tabHtml = render(mount(CostPage))
+  test('用量页底部有「历史数据」：说明入账即冻结，两个按钮都在', () => {
+    for (const needle of ['历史数据', '入账时就冻结', '导入安装前历史', '清除全部历史', '不可恢复']) {
+      assert.ok(tabHtml.includes(needle), `缺少「${needle}」：${tabHtml.slice(-260)}`)
+    }
+    return '说明 + 两个按钮'
+  })
+  assert.ok(clickText(mount(CostPage), '清除全部历史'), '应有「清除全部历史」按钮')
+  const confirmingHtml = render(mount(CostPage))
+  test('点「清除全部历史」→ 只是进入确认态（一个请求都不发）', () => {
+    assert.ok(confirmingHtml.includes('再点一次确认清空'), `应出现确认按钮：${confirmingHtml.slice(-200)}`)
+    assert.equal(calls.filter(call => call.path.includes('/history/clear')).length, 0, '确认前不该发请求')
+    return '未发请求'
+  })
+  assert.ok(clickText(mount(CostPage), '再点一次确认清空'), '应能点到确认按钮')
+  await tick()
+  await tick()
+  await tick()
+  const clearedHtml = render(mount(CostPage))
+  test('再点一次 → POST /history/clear 带确认串，并回显清了多少', () => {
+    const hit = calls.filter(call => call.path.includes('/history/clear')).at(-1)
+    assert.ok(hit !== undefined, '应该发了清空请求')
+    assert.deepEqual(JSON.parse(hit.body), { confirm: 'clear-all-history' }, `实际：${hit.body}`)
+    assert.ok(clearedHtml.includes('已清空：明细 12 天 / 3456 条'), `应回显清空结果：${clearedHtml.slice(-260)}`)
+    assert.ok(!clearedHtml.includes('再点一次确认清空'), '清完要退出确认态')
+    return 'POST { confirm: clear-all-history } · 回显'
+  })
+  assert.ok(clickText(mount(CostPage), '导入安装前历史'), '应有导入按钮')
+  await tick()
+  await tick()
+  await tick()
+  const probedHtml = render(mount(CostPage))
+  test('点「导入安装前历史」→ 显示扫描结果与真实原因（不假装导入）', () => {
+    assert.ok(probedHtml.includes('扫描结果'), `应显示探测结果：${probedHtml.slice(-260)}`)
+    assert.ok(probedHtml.includes('7 个项目 / 23 份会话日志'), '要把扫到多少说清楚')
+    assert.ok(probedHtml.includes('分帧 zstd'), '要把真实原因说出来')
+    assert.ok(!probedHtml.includes('已导入'), '不该假装导入成功')
+    return '原因说清楚 · 不假装'
+  })
 })()
 
 console.log('\n[左侧栏：余额可点击切换 DeepSeek 两条路线]')
