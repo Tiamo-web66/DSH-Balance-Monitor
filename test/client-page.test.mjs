@@ -1341,34 +1341,58 @@ await (async () => {
     catch (error) { return `__THROW__${String(error?.message ?? error)}` }
   }
   // conversation.input.dock 注册了两个：index 0 = 本会话费用（order 4）、index 1 = 额度横条（order 5）
+  // conversation.composer.dock 也两个：index 0 = 本会话费用（order 8）、index 1 = 右下角角标（order 9）
   const composerSession = component('conversation.input.dock', 0).component
   const headerSession = component('conversation.session.header.actions', 0).component
   const strip = component('conversation.input.dock', 1).component
-  const corner = component('conversation.composer.dock', 0).component
+  const cornerDock = component('conversation.composer.dock', 0).component
+  const corner = component('conversation.composer.dock', 1).component
+  /**
+   * 收集「按宿主 dock 列宽」的那层样式：判据是 `maxWidth` 里带宿主的
+   * `--dsh-composer-card-max-width`（只有输入区附近那几条会有；标题栏那处不该有）。
+   */
+  const dockColumns = (Component, props) => {
+    const out = []
+    walk(mount(Component, props), node => {
+      const style = node.props?.style
+      if (typeof style?.maxWidth === 'string' && style.maxWidth.includes('--dsh-composer-card-max-width')) out.push(style)
+    })
+    return out
+  }
   try {
+    SIDEBAR.sessionCost = { enabled: true, position: 'dock', showHitRate: true, includeSubagent: false }
+    await reloadSidebar()
+    const dockHtml = await renderSession(cornerDock, { sessionId: 'sess-parent' })
+    const dockIdle = await renderSession(cornerDock, {})
+    test('位置=dock（输入框下方）→ 那一行该渲染；宿主没给 sessionId 就不渲染', () => {
+      for (const needle of ['本会话 ¥2.1600', '3 次', '5.0M tok', '命中 80.0%']) {
+        assert.ok(dockHtml.includes(needle), `缺少「${needle}」：${dockHtml.slice(0, 200)}`)
+      }
+      assert.equal(dockIdle.includes('本会话'), false, '没有会话 id 就不该有这一行')
+      return '¥2.1600 · 3 次 · 5.0M · 80.0%'
+    })
+    // 输入框下方那条在宿主的 flex dock 里（`display:flex; justify-content:center`，不是 column flex，
+    // 块级子元素不会自动拉伸）：必须去掉 `margin: auto`，否则会缩成内容宽并在 dock 里居中。
+    test('输入框下方那条：吃同一套列宽、但不居中（贴会话内容列左边）', () => {
+      const rows = dockColumns(cornerDock, { sessionId: 'sess-parent' })
+      assert.equal(rows.length, 1, `应有且只有一行吃 dock 列宽：${rows.length}`)
+      assert.equal(rows[0].margin, '0', 'dock 里要靠拉伸而非 margin auto')
+      assert.ok(String(rows[0].width).startsWith('calc(100% -'), `宽度要减掉两侧留白：${rows[0].width}`)
+      return 'margin 0 · 同一套 --dsh-composer-* 列宽'
+    })
     SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
     await reloadSidebar()
     const composerHtml = await renderSession(composerSession, { sessionId: 'sess-parent' })
     const headerIdle = await renderSession(headerSession, { sessionId: 'sess-parent' })
-    test('本会话费用：金额 / 调用数 / token / 命中率；位置=composer 时标题栏那处不渲染', () => {
+    const dockIdleAgain = await renderSession(cornerDock, { sessionId: 'sess-parent' })
+    test('本会话费用：金额 / 调用数 / token / 命中率；位置=composer 时另两处不渲染', () => {
       for (const needle of ['本会话 ¥2.1600', '3 次', '5.0M tok', '命中 80.0%']) {
         assert.ok(composerHtml.includes(needle), `缺少「${needle}」：${composerHtml.slice(0, 200)}`)
       }
       assert.ok(!headerIdle.includes('本会话'), '位置=composer 时标题栏那处不该渲染')
+      assert.ok(!dockIdleAgain.includes('本会话'), '位置=composer 时输入框下方那处不该渲染')
       return '¥2.1600 · 3 次 · 5.0M · 80.0%'
     })
-    /**
-     * 收集「按宿主 dock 列宽居中」的那层样式：判据是 `maxWidth` 里带宿主的
-     * `--dsh-composer-card-max-width`（只有输入区上方那两条会有；标题栏那处不该有）。
-     */
-    const dockColumns = (Component, props) => {
-      const out = []
-      walk(mount(Component, props), node => {
-        const style = node.props?.style
-        if (typeof style?.maxWidth === 'string' && style.maxWidth.includes('--dsh-composer-card-max-width')) out.push(style)
-      })
-      return out
-    }
     test('本会话费用那行按宿主的 dock 列宽居中（不再贴会话面板左边）', () => {
       const rows = dockColumns(composerSession, { sessionId: 'sess-parent' })
       assert.equal(rows.length, 1, `应有且只有一行吃 dock 列宽：${rows.length}`)
@@ -2065,7 +2089,7 @@ console.log('\n[侧栏：隐藏今日消耗的边界 / 角标只藏金额 / 横�
 await (async () => {
   const sidebar = component('sidebar.footer.action')
   const strip = component('conversation.input.dock', 1).component
-  const corner = component('conversation.composer.dock', 0).component
+  const corner = component('conversation.composer.dock', 1).component
   const saved = {
     // 注意：不能用 `SIDEBAR.modelCard` —— 前面那节把它复位成了 `undefined`（见 MODEL_CARD_FIXTURE 注释）
     modelCard: MODEL_CARD_FIXTURE, ui: SIDEBAR.ui, corner: SIDEBAR.corner,

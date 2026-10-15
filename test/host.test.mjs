@@ -1366,7 +1366,7 @@ await test('全默认的布尔提交上去 → state.json 不留多余键（读�
       enabled: false, defaultExpanded: false, rememberExpanded: true, showTokens: true, showShare: true,
       period: 'today', rows: 5, position: 'bottom',
     },
-    sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
+    sessionCost: { enabled: false, position: 'dock', showHitRate: true, includeSubagent: false },
     quotaStrip: { enabled: false, showBalance: true },
   })
   assert.equal(res.statusCode, 200)
@@ -1378,6 +1378,35 @@ await test('全默认的布尔提交上去 → state.json 不留多余键（读�
   await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: null, sessionCost: null, quotaStrip: null })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).modelCard, undefined)
   return '全默认不留余键'
+})
+
+// `position` 的白名单在「读盘归一」与「局部补丁合并」两处各写一份 —— 只改一处，
+// 另一个方向就会把刚存的合法值静默丢掉（`dock` 是 0.9.0 新增的第四个位置：输入框下方，
+// 也是随包默认值）。这里两种写法都过一遍：非法值不冲掉生效值、非默认值能存能读。
+await test('sessionCost.position：dock 是新默认；composer 能存能读；非法值保持原值', async () => {
+  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
+  const report = () => call('GET', '/plugins/dsh-balance-monitor/report').then(res => res.json.data)
+  // 随包默认 = dock（输入框下方），且默认值不落盘
+  await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: null })
+  assert.equal((await report()).sessionCost.position, 'dock', '默认位置应是 dock')
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost, undefined, '全默认不留条')
+  // 非默认的 position 必须落盘
+  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'composer' } })
+  assert.equal(saved.json.data.sessionCost.position, 'composer')
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost.position, 'composer',
+    '非默认的 position 必须落盘（否则重启即丢）')
+  // 重启 = 重新 apply（真实加载路径）
+  mod.apply(makeCtx({ providers, settings }))
+  const afterRestart = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
+  assert.equal(afterRestart.sessionCost.position, 'composer', 'composer 要活过重启')
+  // 非法值（老客户端 / 手改文件）不许把生效值冲掉
+  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'bottom' } })
+  assert.equal(junk.json.data.sessionCost.position, 'composer', '不认识的 position 保持原值')
+  // 显式切回 dock（= 默认）→ 文件里不留条，但生效值就是 dock
+  const back = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'dock' } })
+  assert.equal(back.json.data.sessionCost.position, 'dock')
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost, undefined, '回到默认不留条')
+  return 'dock 默认 · composer 存读通 · 非法保持'
 })
 
 await test('侧栏也带预算进度（横条那格），与设置页概览同一套规则', async () => {
