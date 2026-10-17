@@ -10,8 +10,10 @@ import {
   DEEPSEEK_BALANCE_URL,
   DEEPSEEK_PLATFORM_BALANCE_URL,
   isOfficialDeepSeek,
+  isKeyUsable,
   parseDeepSeekAccountSummary,
   parseDeepSeekBalance,
+  pickReplacementKey,
   queryDeepSeekAccountBalance,
   queryDeepSeekBalance,
   summarizeKeyBalances,
@@ -172,13 +174,27 @@ const ACCOUNT_BODY = {
 }
 
 console.log('\n[账号路线（deepseek-account）：平台余额]')
-test('解析平台 get_user_summary：正常钱包 = 总余额，赠送钱包 = 赠送，充值自己算', () => {
+test('解析平台 get_user_summary：总额 = 正常 + 赠送，赠送单独给出，充值 = 正常钱包', () => {
   const parsed = parseDeepSeekAccountSummary(ACCOUNT_BODY)
   assert.equal(parsed.total, -0.04337202)
   assert.equal(parsed.granted, 0)
-  assert.equal(parsed.toppedUp, -0.043372, '充值 = 正常 - 赠送（保留 6 位）')
+  assert.equal(parsed.toppedUp, -0.043372, '有赠送钱包（哪怕是 0）时，充值 = 正常钱包（保留 6 位）')
   assert.equal(parsed.currency, 'CNY')
   assert.equal(parsed.source, 'account-platform')
+})
+test('赠送钱包有余额时，总额必须把赠送加进去（否则账户会被显示成负数）', () => {
+  const parsed = parseDeepSeekAccountSummary({
+    data: {
+      biz_data: {
+        normal_wallets: [{ currency: 'CNY', balance: '-0.0433720200000000' }],
+        bonus_wallets: [{ currency: 'CNY', balance: '29.8897718800000000' }],
+      },
+    },
+  })
+  assert.equal(parsed.total, 29.84639986, '-0.04337202 + 29.88977188')
+  assert.equal(parsed.granted, 29.88977188)
+  assert.equal(parsed.toppedUp, -0.043372, '充值仍只算正常钱包')
+  assert.equal(parsed.currency, 'CNY')
 })
 test('biz_data 直接挂在 data 上也认；缺钱包 / 脏输入返回 null', () => {
   const flat = parseDeepSeekAccountSummary({ data: { normal_wallets: [{ currency: 'CNY', balance: '12.5' }] } })
@@ -272,6 +288,41 @@ test('币种不一致时不把金额加在一起', () => {
   assert.equal(summary.amount, null)
   assert.equal(summary.mixedCurrency, true)
   assert.equal(summary.isAvailable, true)
+})
+
+console.log('\n[自动换 key：可用判据与备选选择]')
+test('isKeyUsable：余额为正且官方可用；负数 / is_available=false / 金额未知都不算', () => {
+  assert.equal(isKeyUsable({ amount: 26.07, isAvailable: true }), true)
+  assert.equal(isKeyUsable({ amount: 0.01 }), true, '没给 isAvailable 时按可用')
+  assert.equal(isKeyUsable({ amount: -0.01, isAvailable: true }), false)
+  assert.equal(isKeyUsable({ amount: 26.07, isAvailable: false }), false)
+  assert.equal(isKeyUsable({ isAvailable: true }), false, '金额未知不猜')
+  assert.equal(isKeyUsable(null), false)
+})
+test('pickReplacementKey：排除当前 key，优先余额最大的可用 key', () => {
+  const target = pickReplacementKey([
+    { ref: 'DEEPSEEK_API_KEY', amount: -0.01, isAvailable: false },
+    { ref: 'DEEPSEEK_API_KEY_2', amount: 20.69, isAvailable: true },
+    { ref: 'DEEPSEEK_API_KEY_3', amount: 8.45, isAvailable: true },
+    { ref: 'DEEPSEEK_API_KEY_4', amount: 26.07, isAvailable: true },
+    { ref: 'DEEPSEEK_API_KEY_5', amount: 99, isAvailable: false },
+  ], 'DEEPSEEK_API_KEY')
+  assert.equal(target.ref, 'DEEPSEEK_API_KEY_4')
+})
+test('pickReplacementKey：没有可用 key 时返回 null（不把负余额当备选）', () => {
+  assert.equal(pickReplacementKey([
+    { ref: 'a', amount: -0.01, isAvailable: false },
+    { ref: 'b', amount: -0.2, isAvailable: false },
+  ], 'a'), null)
+  assert.equal(pickReplacementKey([], 'a'), null)
+})
+test('pickReplacementKey：限定币种，不拿 USD 的 99 去顶 CNY 的 1', () => {
+  const target = pickReplacementKey([
+    { ref: 'a', amount: -0.01, currency: 'CNY', isAvailable: false },
+    { ref: 'b', amount: 1, currency: 'CNY', isAvailable: true },
+    { ref: 'c', amount: 99, currency: 'USD', isAvailable: true },
+  ], 'a', 'CNY')
+  assert.equal(target.ref, 'b')
 })
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)
