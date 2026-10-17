@@ -101,7 +101,7 @@
 | 界面名 | provider id | 认证 | 余额来源（实测） |
 |---|---|---|---|
 | `DeepSeek` | `deepseek-official` | `Authorization: Bearer`（API Key） | `api.deepseek.com/user/balance` → 例：`-0.01 CNY` |
-| `DeepSeek Account` | `deepseek-account` | `x-dsh-auth-token`（宿主 `deepseekAccount` 服务签发） | `platform.deepseek.com/api/v0/users/get_user_summary` → 例：`normal_wallets -0.0433720200000000` · `bonus_wallets 0` |
+| `DeepSeek Account` | `deepseek-account` | `x-dsh-auth-token`（宿主 `deepseekAccount` 服务签发） | `platform.deepseek.com/api/v0/users/get_user_summary` → 例：`normal_wallets -0.04` + `bonus_wallets 29.89` = **总额 ¥29.84**（与推理域 `total_balance` 一致） |
 
 - **怎么知道有哪些 key**（两条路一起用）：
   1. **按候选名探测**：宿主凭据服务没有枚举 refs 的接口（`listRecords()` 只覆盖 `records:` 段），
@@ -114,6 +114,22 @@
 - **多把 key**：宿主自己的 DeepSeek API Key 适配器只认一把（`apiKeyEnv` 是单值），想按多把 key 汇总
   就用 `deepseekKeys` 列引用（字符串或 `[{ ref, label }]`）——**侧栏余额 = 各把 key 之和**，
   币种不一致时不显示总额。没填 label 的引用会按名字派生一个短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`）。
+  ⚠️ 这里列出的 key **只用于查余额，不会被宿主拿去发请求**；宿主始终只用 `apiKeyEnv` 那一把。
+  如果 `deepseekKeys` 没把 `apiKeyEnv` 列进去，侧栏总额就不会包含宿主真正在用的那把——
+  主 key 扣到负数时，总额仍可能看着很高。
+- **自动换 key**（默认开，`state.json` 里 `"autoKeySwitch": false` 可关）：只对 **API Key 路线**
+  （`deepseek-official`）生效，且 `deepseekKeys` 里至少有一把别的 key。每次 `llm/stream` 真正
+  发请求前检查活跃 key：官方 `is_available=false` 或余额 ≤ 0 时，按余额从大到小挑一把可用 key，
+  把它的**值写进当前 `apiKeyEnv` 引用**（`credentials.set`）——下一次 `credentials.resolve()`
+  立即看到新 key。被换下的 key 如果还有正余额，会先备份到 `DEEPSEEK_API_KEY_REPLACED`，不会丢。
+  换完后侧栏明细里对应的 key 标「使用中」，并显示一行「主 key 已自动从 X 切到 Y」。
+  如果宿主主 key 不在 `deepseekKeys` 里，明细会单独列一行「主 key · 使用中」——避免把
+  7 把备用 key 的合计误当成宿主能用的余额。
+  ⚠️ 侧栏点「DeepSeek」只决定**看哪份余额**；会话实际走哪条路线由模型选择器决定。
+  自动换 key 只对 `deepseek-official`（API Key 路线）生效，`deepseek-account` 不换。
+  如果请求发出后才发现 402/QUOTA（余额检查还没刷新），本次请求仍会失败；插件会把这把
+  标成不可用，**下一次请求前**换到有余额的那把。当前请求不会自动重试（宿主没有请求内换 key
+  的钩子，插件也不伪造重试）。
 - **卡片上的密钥编辑区**：**只渲染在 API Key 路线**（`deepseek-official`）的卡片上。
   账号路线（`deepseek-account`）不吃 key —— 它用宿主 `deepseekAccount` 服务的登录 token，路线本身
   没有 `apiKeyEnv`：候选名一个都推不出来、`/keys` 恒回空列表、`nextRef` 是 `null`（在那个输入框里
@@ -122,7 +138,7 @@
   写进宿主凭据库（顺位引用名，或自己填 `ref` / `label`），每行可删（**主 key 拒绝删**，
   要换请走卡片上方宿主自己的「API 密钥」）。默认**不预取明文**，点行内小眼睛才 `POST /keys/reveal`
   拉一次值；该路由只认「属于这条路线」的引用（别的引用一律 403）。
-- 侧栏**余额行点一下就在两条之间切换**（`余额 · DeepSeek ⇄ ¥0.01` → `余额 · DeepSeek Account ⇄ ¥-0.04`），
+- 侧栏**余额行点一下就在两条之间切换**（`余额 · DeepSeek ⇄ ¥0.01` → `余额 · DeepSeek Account ⇄ ¥29.64`），
   选择记在 `localStorage['balance-monitor:sidebar-balance']`；只有一条路线时不可点（提示里说明）。
 - 账号路线的 token 由宿主服务签发（只有宿主拿得到），插件**不读**磁盘上的凭据值
   （唯一碰 `~/.dsh/.credentials.yaml` 的地方是上面那条「只取键名」）；
@@ -369,9 +385,10 @@ LiteLLM 的 `model_prices_and_context_window.json` 算的（它仓库里有镜�
 **模型花费卡片**：可开关；收起时标题行给 Top-1，展开给 Top-N + 占比条；行尾对未定价的调用标 ⚠。
 周期可选今日 / 近 90 天，行数 1–10，位置底部或顶部；「记住展开状态」打开时把状态记在浏览器本地。
 
-**轮询与节流**：客户端默认每 **30 秒**拉一次 `GET /sidebar`，间隔在「显示 → 界面」里改
+**轮询与节流**：客户端默认每 **15 秒**拉一次 `GET /sidebar`，间隔在「显示 → 界面」里改
 （`ui.refreshSeconds`，10–60 秒，只改取数节奏，不改记账）。宿主对中转站的探测有 **5 分钟冷却**
-（不让侧栏的常驻轮询把探测节奏带起来），官方余额 60s 缓存。缓存里没有倍率的供应商
+（不让侧栏的常驻轮询把探测节奏带起来），官方余额 **15s** 缓存（侧栏每 15s 拉一次时，每次轮询都会重新查；
+切 key 后会强制刷新一次）。缓存里没有倍率的供应商
 在探测发生前一直记「未定价」。
 
 ### 工作区顶部：进行中轨道
@@ -597,6 +614,9 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
   卡片上的密钥编辑区会自动维护它（**只有 API Key 路线有编辑区**，账号路线不渲染）；
   侧栏余额 = 各把之和（币种不一致就不给总额）。
+- `autoKeySwitch`：主 key 不可用时自动换到有余额的 key（默认 **开**；只有显式 `false` 才关）。
+  只对 API Key 路线生效，且要求 `deepseekKeys` 里至少有一把别的 key；换 key 会写宿主凭据库
+  （`credentials.set`），被换下的正余额 key 备份到 `DEEPSEEK_API_KEY_REPLACED`。
 - `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
   （默认 `DEEPSEEK_API_KEY`、`DEEPSEEK_KEY` × `_2…_9`），设置页「显示 → 密钥扫描」可改。
 - `scanCredentialsFile`：读 `~/.dsh/.credentials.yaml` 里 `refs:` 段的**键名**（不读值）来补全候选名。
@@ -606,7 +626,7 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
 - `priceTable`：整段覆盖默认价表；不写就用随包的默认表（官方快照 + 站方快照）。
 - `ledger.json` / `days.json` / `prices.json`：账本 / 日汇总 / 站方价目；账本**只加总不重算**。
 
-**探测结果只放内存**（60s 缓存），不落盘：账号余额/花费不在磁盘上留副本。
+**探测结果只放内存**（余额 15s 缓存），不落盘：账号余额/花费不在磁盘上留副本。
 
 API Key 对外的**只读**痕迹只有 `hasKey: true/false`。两条例外要说清楚：
 `GET /keys` 只回「引用名 + 配没配」（**不含值**）；`POST /keys` 会把你在卡片上填的 key

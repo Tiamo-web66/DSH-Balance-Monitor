@@ -87,6 +87,7 @@ function liteLLMPayload() {
 }
 
 const seen = []
+let primaryDry = false
 globalThis.fetch = async (url, init) => {
   const path = new URL(url).pathname
   seen.push({ url: String(url), auth: init?.headers?.authorization })
@@ -96,6 +97,12 @@ globalThis.fetch = async (url, init) => {
   if (String(url).includes('/user/balance')) {
     // 两把 key 给不同余额：用来验证「总额相加 + 明细逐条」
     const auth = String(init?.headers?.authorization ?? '')
+    if (primaryDry && auth.includes('sk-key-one')) {
+      return new Response(JSON.stringify({
+        is_available: false,
+        balance_infos: [{ currency: 'CNY', total_balance: '-0.01', granted_balance: '0', topped_up_balance: '-0.01' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
     if (auth.includes('sk-invalid')) {
       return new Response(JSON.stringify({
         error: { message: 'Authentication Fails', type: 'authentication_error' },
@@ -246,8 +253,10 @@ function makeCtx({ providers, settings } = {}) {
     settings: service,
     // 凭据服务：断言收到的是**原字符串**（brand 只在编译期存在），并给出与 env 同值的结果。
     credentials: {
+      values: {},
       async resolve(ref) {
         credentialCalls.push(ref)
+        if (this.values[ref] !== undefined) return { value: this.values[ref], source: 'file' }
         if (ref === 'WALK_GROK_API_KEY') return { value: 'sk-test-walk-grok', source: 'file' }
         if (ref === 'DEEPSEEK_API_KEY') return { value: 'sk-key-one', source: 'file' }
         if (ref === 'DEEPSEEK_API_KEY_2') return { value: 'sk-key-two', source: 'file' }
@@ -257,8 +266,16 @@ function makeCtx({ providers, settings } = {}) {
       describeCalls: [],
       setCalls: [],
       unsetCalls: [],
-      async set(ref, value) { this.setCalls.push({ ref, value }); if (ref === 'DEEPSEEK_API_KEY_2') this.extraConfigured = true },
-      async unset(ref) { this.unsetCalls.push(ref); if (ref === 'DEEPSEEK_API_KEY_2') this.extraConfigured = false },
+      async set(ref, value) {
+        this.setCalls.push({ ref, value })
+        this.values[ref] = value
+        if (ref === 'DEEPSEEK_API_KEY_2') this.extraConfigured = true
+      },
+      async unset(ref) {
+        this.unsetCalls.push(ref)
+        delete this.values[ref]
+        if (ref === 'DEEPSEEK_API_KEY_2') this.extraConfigured = false
+      },
       async describe(ref) {
         this.describeCalls.push(ref)
         if (ref === 'DEEPSEEK_API_KEY' || (ref === 'DEEPSEEK_API_KEY_2' && this.extraConfigured !== false)) return { configured: true, source: 'file', writable: true }
@@ -1211,7 +1228,7 @@ await test('officialPeak 随 state.json 重载（loadStore 认这个键，非法
 
 console.log('\n[界面偏好：语言 / 轮询间隔 / 隐藏区块 / 会话 ID]')
 await test('三处 payload 共用同一份 ui（/state、/sidebar、/report）', async () => {
-  const expected = { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false }
+  const expected = { locale: 'auto', refreshSeconds: 15, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false }
   const state = (await call('GET', '/plugins/dsh-balance-monitor/state')).json.state.ui
   const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.ui
   const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data.ui
@@ -1224,16 +1241,16 @@ await test('POST /config：ui 是局部补丁，只沉淀与默认不同的字�
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
   const saved = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { locale: 'en' } })
   assert.equal(saved.json.data.ui.locale, 'en')
-  assert.equal(saved.json.data.ui.refreshSeconds, 30, '没给的字段保持默认')
+  assert.equal(saved.json.data.ui.refreshSeconds, 15, '没给的字段保持默认')
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).ui, { locale: 'en' },
     '只把改动过的键写进文件（不动配置就不该平白多出一段）')
   // 局部补丁：只改间隔不会把语言带掉
-  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 15 } })
+  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 20 } })
   assert.equal(patched.json.data.ui.locale, 'en', '语言要保住')
-  assert.equal(patched.json.data.ui.refreshSeconds, 15)
+  assert.equal(patched.json.data.ui.refreshSeconds, 20)
   // 非法值保持原值（越界间隔 / 不认识的语言）
   const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: { refreshSeconds: 5, locale: 'fr' } })
-  assert.equal(junk.json.data.ui.refreshSeconds, 15, '越界间隔保持原值')
+  assert.equal(junk.json.data.ui.refreshSeconds, 20, '越界间隔保持原值')
   assert.equal(junk.json.data.ui.locale, 'en', '不认识的语言保持原值')
   // 四个布尔开关（`sidebarTools` 默认 false，所以存的是「打开」这一位）
   const flags = await call('POST', '/plugins/dsh-balance-monitor/config', {
@@ -1242,14 +1259,14 @@ await test('POST /config：ui 是局部补丁，只沉淀与默认不同的字�
   assert.equal(flags.json.data.ui.hideOfficialBalance, true)
   assert.equal(flags.json.data.ui.sidebarTools, true, '侧栏两个操作行默认关，打开后要生效')
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).ui,
-    { locale: 'en', refreshSeconds: 15, hideOfficialBalance: true, hideTodayCost: true, showSessionId: true, sidebarTools: true })
+    { locale: 'en', refreshSeconds: 20, hideOfficialBalance: true, hideTodayCost: true, showSessionId: true, sidebarTools: true })
   // 客户端是照 `/sidebar` 里这份 ui 决定渲不渲染那两行的 —— 三处 payload 必须都带上这一位
   const sidebarUi = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data.ui
   assert.equal(sidebarUi.sidebarTools, true, '侧栏 payload 必须带 sidebarTools')
   // null = 回默认
   const cleared = await call('POST', '/plugins/dsh-balance-monitor/config', { ui: null })
   assert.deepEqual(cleared.json.data.ui,
-    { locale: 'auto', refreshSeconds: 30, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false })
+    { locale: 'auto', refreshSeconds: 15, hideOfficialBalance: false, hideTodayCost: false, showSessionId: false, sidebarTools: false })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).ui, undefined, '回默认 = 文件里不留一条')
   return '局部补丁 · 非法保持 · null 回默认'
 })
@@ -1552,6 +1569,31 @@ await test('多把 key 里只有部分 is_available=false：总额仍可用，�
   assert.equal(official.keys.find(item => item.ref === 'DEEPSEEK_API_KEY_9').isAvailable, false)
   assert.equal(official.keys.find(item => item.ref === 'DEEPSEEK_API_KEY_9').amount, -0.34)
   return `1.17 可用 · KEY_9 -0.34 不足`
+})
+
+await test('自动换 key：主 key 不可用时，请求前切到有余额的 _2', async () => {
+  // 用户实际配置：deepseekKeys 里只有额外 key，没有宿主的 DEEPSEEK_API_KEY。
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: ['DEEPSEEK_API_KEY_2', 'DEEPSEEK_API_KEY_9'] })
+  primaryDry = true
+  const primed = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data
+  const primedOfficial = primed.balances.find(item => item.provider === 'deepseek-official')
+  assert.equal(primedOfficial.activeKey?.ref, 'DEEPSEEK_API_KEY', '主 key 不在列表里时应单独带出')
+  assert.equal(primedOfficial.activeKey?.amount, -0.01)
+  const credentials = ctx.get('credentials')
+  const before = credentials.setCalls.length
+  await feedStream({ provider: 'deepseek-official', model: 'deepseek-flash', sessionId: 's-auto-key', inputTokens: 0 })
+  const switched = credentials.setCalls.slice(before).find(call => call.ref === 'DEEPSEEK_API_KEY')
+  assert.deepEqual(switched, { ref: 'DEEPSEEK_API_KEY', value: 'sk-key-two' }, '应把有余额的 _2 写进主 key 引用')
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data
+  const official = sidebar.balances.find(item => item.provider === 'deepseek-official')
+  const second = official.keys.find(key => key.ref === 'DEEPSEEK_API_KEY_2')
+  assert.equal(second.active, true, `侧栏应标出使用中的 key：${JSON.stringify(official.keys)}`)
+  assert.equal(sidebar.keySwitch?.to, 'DEEPSEEK_API_KEY_2', '侧栏应带出自动切换记录')
+  // 还原夹具，后面的用例仍拿主 key = 0.01 的原始状态。
+  primaryDry = false
+  credentials.values.DEEPSEEK_API_KEY = 'sk-key-one'
+  await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })
+  return '主 key -0.01 → _2 1.50'
 })
 
 await test('清空 key 列表 → 回到用路线自己的 apiKeyEnv（单把）', async () => {
