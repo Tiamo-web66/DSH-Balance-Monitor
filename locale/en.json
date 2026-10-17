@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Balance monitor + image backfill",
-    "description": "Pick a provider type (Sub2Api / Other) on the Models settings cards. Sub2Api reports quota, rate multiplier and models, and computes spend from the multiplier. Models that declare no input modality get image input backfilled, so a newly added custom provider needs no per-model clicking."
+    "description": "Pick a provider type (Sub2Api / Other) on the Models settings cards. Sub2Api reports quota, rate multiplier and models, and computes spend from the multiplier. Models that declare no input modality get image input backfilled, so a newly added custom provider needs no per-model clicking. Also pins a live-session rail above the workspace list and badges collapsed workspaces that still have running or waiting conversations."
   }
 }
