@@ -548,6 +548,62 @@ function readonly(fn) {
   }
 }
 
+test('文件栏路径右侧：复制按钮把当前目录写入剪贴板', () => {
+  const regs = slots.get('sidebar.right.tab.files.actions') ?? []
+  assert.equal(regs.length, 1, '应注册到文件栏操作插槽')
+  const { registration, component } = regs[0]()
+  assert.equal(registration.id, 'balance-monitor:copy-directory')
+  assert.equal(registration.order, 20)
+  const target = 'E:\\项目\\DSH-Balance-Monitor'
+  let written = null
+  const saved = globalThis.navigator
+  globalThis.navigator = {
+    language: 'zh-CN',
+    clipboard: { writeText(text) { written = text; return Promise.resolve() } },
+  }
+  try {
+    let button = null
+    mount(component, { absolutePath: target }, node => {
+      if (node?.props?.['data-files-copy-path'] === true) button = node
+    })
+    assert.ok(button !== null, '找不到复制按钮')
+    assert.equal(button.props['aria-label'], '复制目录路径')
+    button.props.onClick()
+    assert.equal(written, target)
+    return target
+  } finally {
+    globalThis.navigator = saved
+  }
+})
+
+test('文件预览头部：复制按钮把当前文件路径写入剪贴板', () => {
+  const regs = slots.get('sidebar.right.tab.document.actions') ?? []
+  assert.equal(regs.length, 1, '应注册到文件预览操作插槽')
+  const { registration, component } = regs[0]()
+  assert.equal(registration.id, 'balance-monitor:copy-file-path')
+  assert.equal(registration.order, 20)
+  const target = 'E:\\项目\\DSH-Balance-Monitor\\.gitattributes'
+  let written = null
+  const saved = globalThis.navigator
+  globalThis.navigator = {
+    language: 'zh-CN',
+    clipboard: { writeText(text) { written = text; return Promise.resolve() } },
+  }
+  try {
+    let button = null
+    mount(component, { absolutePath: target }, node => {
+      if (node?.props?.['data-document-copy-path'] === true) button = node
+    })
+    assert.ok(button !== null, '找不到复制按钮')
+    assert.equal(button.props['aria-label'], '复制文件路径')
+    button.props.onClick()
+    assert.equal(written, target)
+    return target
+  } finally {
+    globalThis.navigator = saved
+  }
+})
+
 function render(element) {
   return readonly(() => renderNode(element))
 }
