@@ -385,6 +385,10 @@ let keysOverride = null
  * 用来锁住「密钥行右侧显示余额」。
  */
 let keysBalanceOverride = null
+/** 旧宿主没有 `/keys/balances`（404 not found）时，客户端应改打 `/balance/refresh`。 */
+let keysBalanceMissing = false
+/** `/balance/refresh` 的响应覆盖。默认仍是报表夹具里的那份余额。 */
+let keysBalanceRefreshOverride = null
 const DEFAULT_KEY_BALANCES = {
   keys: [
     { ref: 'DEEPSEEK_API_KEY', amount: 20.69, currency: 'CNY', isAvailable: true },
@@ -401,7 +405,8 @@ globalThis.fetch = async (url, init) => {
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
-    : path.includes('/keys/balances') ? { ok: true, data: keysBalanceOverride ?? DEFAULT_KEY_BALANCES }
+    : path.includes('/keys/balances')
+      ? (keysBalanceMissing ? { ok: false, error: 'not found' } : { ok: true, data: keysBalanceOverride ?? DEFAULT_KEY_BALANCES })
     : path.includes('/keys') ? { ok: true, data: keysOverride ?? KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
@@ -410,7 +415,7 @@ globalThis.fetch = async (url, init) => {
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
       : path.endsWith('/prices/update') ? { ok: true, data: { meta: { ...REPORT.prices.meta, accepted: 320 } } }
         : path.endsWith('/config') ? { ok: true, data: { display: REPORT.display, budget: REPORT.budget, priceSources: REPORT.prices.sources, basisId: 'p1-new0000' } }
-          : path.endsWith('/balance/refresh') ? { ok: true, data: { balance: REPORT.balance } }
+          : path.endsWith('/balance/refresh') ? { ok: true, data: keysBalanceRefreshOverride ?? { balance: REPORT.balance } }
             : { ok: false, error: `unexpected ${path}` }
   return new Response(JSON.stringify(json), { status: 200, headers: { 'content-type': 'application/json' } })
 }
@@ -1998,6 +2003,34 @@ await (async () => {
     assert.equal(/主 key|已配置/.test(fresh.parent.text), false, '余额不该把状态文案拽回值那一行')
     return `¥20.69 · ¥-0.34 · 查询余额`
   })
+  // 旧宿主进程没有 `/keys/balances`，点查询不能停在红字 not found。
+  keysBalanceMissing = true
+  keysBalanceRefreshOverride = {
+    balances: [{
+      provider: 'deepseek-official',
+      keys: [
+        { ref: 'DEEPSEEK_API_KEY', amount: 9.5, currency: 'CNY', isAvailable: true },
+        { ref: 'DEEPSEEK_API_KEY_2', amount: 1.25, currency: 'CNY', isAvailable: true },
+      ],
+    }],
+  }
+  const beforeFallback = calls.length
+  mount(Component, dsProps)
+  await tick()
+  const fallbackTree = mount(Component, dsProps)
+  const fallbackHtml = render(fallbackTree)
+  test('旧宿主没有 /keys/balances：改打余额刷新，右侧仍显示金额', () => {
+    const hitBalances = calls.slice(beforeFallback).some(call => call.path.includes('/keys/balances'))
+    const hitRefresh = calls.slice(beforeFallback).some(call => call.path.endsWith('/balance/refresh') && call.method === 'POST')
+    assert.equal(hitBalances, true, '应先打新路由')
+    assert.equal(hitRefresh, true, '404 后应退回 /balance/refresh')
+    assert.ok(fallbackHtml.includes('¥9.50'), `刷新回来的金额要画出来：${fallbackHtml.slice(0, 400)}`)
+    assert.ok(fallbackHtml.includes('¥1.25'), '第二把 key 的金额也要在')
+    assert.equal(fallbackHtml.includes('not found'), false, '退回成功时不该留下 not found')
+    return '404 → /balance/refresh · ¥9.50'
+  })
+  keysBalanceMissing = false
+  keysBalanceRefreshOverride = null
   // 宿主按供应商过滤后一把都没剩（用户还没配）：界面要明确说清，且**不本地补一份候选名**
   keysOverride = { provider: 'deepseek-official', primaryRef: 'DEEPSEEK_API_KEY', nextRef: 'DEEPSEEK_KEY', scanned: 0, keys: [] }
   mount(Component, dsProps)
