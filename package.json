@@ -1,6 +1,6 @@
 {
   "name": "dsh-balance-monitor",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "private": true,
   "description": "DeepSeek Harness 余额监控 + 模态补全：在「设置 → 模型」的供应商卡片上按类型（Sub2Api / 其他）查询额度、倍率、模型并按倍率算花费；给 llm-pi-ai 里没声明输入模态的模型自动补 input:[text,image]，新增自定义供应商不用再逐个勾「图片」。侧栏工作区顶部列出进行中会话。Balance monitor plus image-modality backfill on the Models settings cards, plus a live-session rail in the sidebar.",
   "type": "module",
