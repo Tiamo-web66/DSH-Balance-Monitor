@@ -14,6 +14,7 @@ import {
   parseDeepSeekBalance,
   queryDeepSeekAccountBalance,
   queryDeepSeekBalance,
+  summarizeKeyBalances,
 } from '../lib/balance.js'
 
 let passed = 0
@@ -234,6 +235,43 @@ await testAsync('非官方平台源不发请求（防 token 被送到别处）',
   assert.equal(calls.some(url => url.includes('platform.deepseek.com')), false, '不该打平台端点')
   assert.equal(calls.length, 1, '只允许推理域那一次')
   assert.equal(calls[0], DEEPSEEK_BALANCE_URL)
+})
+
+console.log('\n[summarizeKeyBalances：多把 key 的总额与「余额不足」]')
+test('还有一把可用时，路线不算余额不足（负的那把不拖垮总额）', () => {
+  const summary = summarizeKeyBalances([
+    { amount: 20.69, currency: 'CNY', isAvailable: true, granted: 0, toppedUp: 20.69, source: 'api-key' },
+    { amount: 16.78, currency: 'CNY', isAvailable: true, granted: 0, toppedUp: 16.78, source: 'api-key' },
+    { amount: -0.34, currency: 'CNY', isAvailable: false, granted: 0, toppedUp: -0.34, source: 'api-key' },
+    { ref: 'bad', error: 'API Key 无效' },
+  ])
+  assert.equal(summary.amount, 37.13)
+  assert.equal(summary.currency, 'CNY')
+  assert.equal(summary.isAvailable, true)
+  assert.equal(summary.mixedCurrency, false)
+})
+test('查到金额的 key 全都不可用，路线才是余额不足', () => {
+  const summary = summarizeKeyBalances([
+    { amount: -0.34, currency: 'CNY', isAvailable: false, granted: 0, toppedUp: -0.34 },
+    { amount: -0.2, currency: 'CNY', isAvailable: false, granted: 0, toppedUp: -0.2 },
+  ])
+  assert.equal(summary.amount, -0.54)
+  assert.equal(summary.isAvailable, false)
+})
+test('一把都没查到金额：不给总额，也不可用', () => {
+  const summary = summarizeKeyBalances([{ error: 'API Key 无效' }, { error: '未找到该引用的 Key' }])
+  assert.equal(summary.amount, null)
+  assert.equal(summary.isAvailable, false)
+  assert.equal(summary.mixedCurrency, false)
+})
+test('币种不一致时不把金额加在一起', () => {
+  const summary = summarizeKeyBalances([
+    { amount: 1, currency: 'CNY', isAvailable: true },
+    { amount: 2, currency: 'USD', isAvailable: true },
+  ])
+  assert.equal(summary.amount, null)
+  assert.equal(summary.mixedCurrency, true)
+  assert.equal(summary.isAvailable, true)
 })
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)

@@ -1753,6 +1753,58 @@ await (async () => {
     assert.ok(!cleaned.includes('价格表'), '关掉后不该还有价格表行')
     return '已收起'
   })
+  // 旧聚合把「每一把都可用」收成路线级 isAvailable=false。总额有钱时不该再写「余额不足」。
+  const savedOfficial = {
+    amount: SIDEBAR_BALANCE_FIRST.amount,
+    isAvailable: SIDEBAR_BALANCE_FIRST.isAvailable,
+    keys: SIDEBAR_BALANCE_FIRST.keys,
+  }
+  SIDEBAR_BALANCE_FIRST.amount = 20.35
+  SIDEBAR_BALANCE_FIRST.isAvailable = false
+  SIDEBAR_BALANCE_FIRST.keys = [
+    { ref: 'DEEPSEEK_API_KEY', label: 'API KEY 2', amount: 20.69, currency: 'CNY', isAvailable: true, granted: 0, toppedUp: 20.69, source: 'api-key' },
+    { ref: 'DEEPSEEK_API_KEY_7', label: 'API KEY 7', amount: -0.34, currency: 'CNY', isAvailable: false, granted: 0, toppedUp: -0.34, source: 'api-key' },
+  ]
+  await reloadSidebar()
+  const pickedOfficial = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === 'DeepSeek')
+  const mixedTree = mount(sidebar.component)
+  test('部分 key 余额不足：总额行不写「余额不足」，只标在那一把上', () => {
+    assert.ok(pickedOfficial, '明细里应能点回 DeepSeek')
+    const header = []
+    const dry = []
+    const healthy = []
+    walk(mixedTree, node => {
+      if (node.props?.key === 'balance') header.push(render(node.props?.children))
+      if (node.props?.key === 'DEEPSEEK_API_KEY_7') dry.push(render(node.props?.children))
+      if (node.props?.key === 'DEEPSEEK_API_KEY') healthy.push(render(node.props?.children))
+    })
+    assert.ok(header.some(text => text.includes('¥20.35')), `总额应是两把之和：${header.join(' | ')}`)
+    assert.ok(header.every(text => !text.includes('余额不足')), `总额行不该写余额不足：${header.join(' | ')}`)
+    assert.ok(dry.some(text => text.includes('余额不足') && text.includes('¥-0.34')), `负余额那把要单独标：${dry.join(' | ')}`)
+    assert.ok(healthy.every(text => !text.includes('余额不足')), `有余额的 key 不该标不足：${healthy.join(' | ')}`)
+    return '总额 ¥20.35 · 仅 API KEY 7 余额不足'
+  })
+  SIDEBAR_BALANCE_FIRST.amount = -0.54
+  SIDEBAR_BALANCE_FIRST.isAvailable = false
+  SIDEBAR_BALANCE_FIRST.keys = [
+    { ref: 'DEEPSEEK_API_KEY', label: 'API KEY 7', amount: -0.34, currency: 'CNY', isAvailable: false },
+    { ref: 'DEEPSEEK_API_KEY_7', label: 'API KEY 8', amount: -0.2, currency: 'CNY', isAvailable: false },
+  ]
+  await reloadSidebar()
+  const allDryTree = mount(sidebar.component)
+  test('查到金额的 key 全都不可用：总额行才写「余额不足」', () => {
+    const header = []
+    walk(allDryTree, node => {
+      if (node.props?.key === 'balance') header.push(render(node.props?.children))
+    })
+    assert.ok(header.some(text => text.includes('余额不足')), `全都不足时总额行要标出来：${header.join(' | ')}`)
+    assert.ok(header.some(text => text.includes('¥-0.54')), `总额应是负的：${header.join(' | ')}`)
+    return '总额 ¥-0.54 · 余额不足'
+  })
+  SIDEBAR_BALANCE_FIRST.amount = savedOfficial.amount
+  SIDEBAR_BALANCE_FIRST.isAvailable = savedOfficial.isAvailable
+  SIDEBAR_BALANCE_FIRST.keys = savedOfficial.keys
+  await reloadSidebar()
   // 侧栏那侧的「隐藏区块」没在这里单测：夹具是 JSON 深拷贝，改完要重新拉 /sidebar 才生效。
   // 只要 `/sidebar` 带 `ui`（host 用例已断言）并且组件按 `ui.hide*` 分支渲染，覆盖就够；
   // 真正的手点验证留到真宿主里做。

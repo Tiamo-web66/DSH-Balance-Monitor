@@ -95,14 +95,16 @@ globalThis.fetch = async (url, init) => {
   }
   if (String(url).includes('/user/balance')) {
     // 两把 key 给不同余额：用来验证「总额相加 + 明细逐条」
-    const isSecond = String(init?.headers?.authorization ?? '').includes('sk-key-two')
+    const auth = String(init?.headers?.authorization ?? '')
+    const isDry = auth.includes('sk-key-dry')
+    const isSecond = auth.includes('sk-key-two')
     return new Response(JSON.stringify({
-      is_available: true,
+      is_available: !isDry,
       balance_infos: [{
         currency: 'CNY',
-        total_balance: isSecond ? '1.50' : '0.01',
+        total_balance: isDry ? '-0.34' : isSecond ? '1.50' : '0.01',
         granted_balance: '0',
-        topped_up_balance: isSecond ? '1.50' : '0.01',
+        topped_up_balance: isDry ? '-0.34' : isSecond ? '1.50' : '0.01',
       }],
     }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
@@ -244,6 +246,7 @@ function makeCtx({ providers, settings } = {}) {
         if (ref === 'WALK_GROK_API_KEY') return { value: 'sk-test-walk-grok', source: 'file' }
         if (ref === 'DEEPSEEK_API_KEY') return { value: 'sk-key-one', source: 'file' }
         if (ref === 'DEEPSEEK_API_KEY_2') return { value: 'sk-key-two', source: 'file' }
+        if (ref === 'DEEPSEEK_API_KEY_9') return { value: 'sk-key-dry', source: 'file' }
       },
       /** 方案 A 的探测接口：只回「有没有配 / 来源」，不回值。 */
       describeCalls: [],
@@ -1530,6 +1533,20 @@ await test('多把 key：总额相加，逐把明细都带出去', async () => {
   const state = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
   assert.deepEqual(state.deepseekKeys, [{ ref: 'DEEPSEEK_API_KEY' }, { ref: 'DEEPSEEK_API_KEY_2' }])
   return `0.01 + 1.50 = ${official.amount}`
+})
+
+await test('多把 key 里只有部分 is_available=false：总额仍可用，不足只留在那一把上', async () => {
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2', 'DEEPSEEK_API_KEY_9'],
+  })
+  const data = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data
+  const official = data.balances.find(item => item.provider === 'deepseek-official')
+  close(official.amount, 1.17, 1e-9, '总额含负余额，但不因此变成查不到')
+  assert.equal(official.isAvailable, true, '还有能用的 key 时，路线不该被标成余额不足')
+  assert.equal(official.keys.find(item => item.ref === 'DEEPSEEK_API_KEY').isAvailable, true)
+  assert.equal(official.keys.find(item => item.ref === 'DEEPSEEK_API_KEY_9').isAvailable, false)
+  assert.equal(official.keys.find(item => item.ref === 'DEEPSEEK_API_KEY_9').amount, -0.34)
+  return `1.17 可用 · KEY_9 -0.34 不足`
 })
 
 await test('清空 key 列表 → 回到用路线自己的 apiKeyEnv（单把）', async () => {
