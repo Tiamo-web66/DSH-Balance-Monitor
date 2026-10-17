@@ -431,12 +431,34 @@ const requireStub = specifier => {
 }
 const slots = new Map()
 const effects = []
+const slotsApi = {
+  inject(name, register) { slots.set(name, (slots.get(name) ?? []).concat([register])) },
+  register(registration, component) { return { registration, component } },
+}
+/** 快照 store 的替身：只提供 getSnapshot / subscribe，够读、不广播。 */
+function fakeSnapshotStore(snapshot) {
+  return { getSnapshot: () => snapshot, subscribe() { return () => {} } }
+}
+/**
+ * 依赖声明的替身。真 Cordis 里 `ctx.inject(deps, cb)` 要等 deps 齐了才回调；这里立即回调，
+ * 并把「声明了哪些服务」记下来供断言。
+ *
+ * 为什么要盯这一条：`ctx.sessions` 在**没声明 inject** 时会抛 `cannot get property ... without
+ * inject`，如果代码写成「先 ctx[name] 再 ctx.get(name)」并把异常吞掉，就永远拿不到服务、
+ * 轨道一直当成「没有进行中」—— 线上就是这样静默失效的。
+ */
+const injectedDeps = []
+const railServices = {
+  slots: slotsApi,
+  sessions: { list: fakeSnapshotStore({ ids: [], byId: {}, phase: 'ready', projectionsBySession: {} }) },
+  workspaces: { list: fakeSnapshotStore({ items: [], archivedSessionIds: [] }) },
+  uiSession: { sessionStatus: fakeSnapshotStore(new Map()) },
+  uiWorkspace: { openSession() {} },
+}
 const ctx = {
-  slots: {
-    inject(name, register) { slots.set(name, (slots.get(name) ?? []).concat([register])) },
-    register(registration, component) { return { registration, component } },
-  },
+  slots: slotsApi,
   effect(fn, label) { effects.push({ fn, label }) },
+  inject(deps, callback) { injectedDeps.push([...deps]); callback(railServices) },
 }
 entry.factory(requireStub).apply(ctx)
 
@@ -2395,6 +2417,32 @@ await (async () => {
     SIDEBAR.credits = saved.credits
     SIDEBAR.providers = saved.providers
   }
+})()
+
+console.log('\n[侧栏：进行中轨道的注册链]')
+await (async () => {
+  test('轨道按 Cordis 依赖声明注册（不是靠 ctx[name] 猜服务）', () => {
+    assert.deepEqual(injectedDeps[0], ['sessions', 'workspaces', 'uiWorkspace', 'uiSession'],
+      `应声明四个服务，实际：${JSON.stringify(injectedDeps)}`)
+    return injectedDeps[0].join(' / ')
+  })
+  test('footer 里两块：余额条（order 10）+ 轨道控制器（order 80，渲染 null）', () => {
+    const regs = slots.get('sidebar.footer.action') ?? []
+    assert.equal(regs.length, 2, `应有 2 个注册，实际 ${regs.length}`)
+    const rail = regs[1]().registration
+    assert.equal(rail.id, 'balance-monitor:running-rail')
+    assert.equal(rail.order, 80)
+    return '2 块 · 轨道 order 80'
+  })
+  test('窄侧栏徽章也一起注册', () => {
+    const regs = slots.get('sidebar.toggle.badge') ?? []
+    assert.equal(regs.length, 1, `应注册 sidebar.toggle.badge，实际 ${regs.length}`)
+    return '1 个'
+  })
+  test('控制器拿得到服务；没有活会话时渲染 null（不显示「进行中 0」）', () => {
+    const html = render(mount(component('sidebar.footer.action', 1).component))
+    assert.equal(html.includes('进行中'), false, `空态不该出现轨道：${html.slice(0, 200)}`)
+  })
 })()
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)
