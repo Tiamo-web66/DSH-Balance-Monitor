@@ -440,16 +440,14 @@ function fakeSnapshotStore(snapshot) {
   return { getSnapshot: () => snapshot, subscribe() { return () => {} } }
 }
 /**
- * 依赖声明的替身。真 Cordis 里 `ctx.inject(deps, cb)` 要等 deps 齐了才回调；这里立即回调，
- * 并把「声明了哪些服务」记下来供断言。
- *
- * 为什么要盯这一条：`ctx.sessions` 在**没声明 inject** 时会抛 `cannot get property ... without
- * inject`，如果代码写成「先 ctx[name] 再 ctx.get(name)」并把异常吞掉，就永远拿不到服务、
- * 轨道一直当成「没有进行中」—— 线上就是这样静默失效的。
+ * 服务查询的替身。**只提供 `get`**，故意不提供 `ctx.xxx` / `ctx.inject` ——
+ * 线上那两样在客户端插件的白名单代理里都会抛：
+ *   · `ctx.sessions`（未声明 inject）→ "service not declared by your plugin"
+ *   · `ctx.inject(...)`（不在 CTX_VERBS 里）→ 读属性即抛，apply 中断
+ * 所以用例把 ctx 收窄成「只有 get」，谁再写回去就会当场炸。
  */
-const injectedDeps = []
+const requestedServices = []
 const railServices = {
-  slots: slotsApi,
   sessions: { list: fakeSnapshotStore({ ids: [], byId: {}, phase: 'ready', projectionsBySession: {} }) },
   workspaces: { list: fakeSnapshotStore({ items: [], archivedSessionIds: [] }) },
   uiSession: { sessionStatus: fakeSnapshotStore(new Map()) },
@@ -458,7 +456,7 @@ const railServices = {
 const ctx = {
   slots: slotsApi,
   effect(fn, label) { effects.push({ fn, label }) },
-  inject(deps, callback) { injectedDeps.push([...deps]); callback(railServices) },
+  get(name) { requestedServices.push(name); return railServices[name] },
 }
 entry.factory(requireStub).apply(ctx)
 
@@ -2421,11 +2419,6 @@ await (async () => {
 
 console.log('\n[侧栏：进行中轨道的注册链]')
 await (async () => {
-  test('轨道按 Cordis 依赖声明注册（不是靠 ctx[name] 猜服务）', () => {
-    assert.deepEqual(injectedDeps[0], ['sessions', 'workspaces', 'uiWorkspace', 'uiSession'],
-      `应声明四个服务，实际：${JSON.stringify(injectedDeps)}`)
-    return injectedDeps[0].join(' / ')
-  })
   test('footer 里两块：余额条（order 10）+ 轨道控制器（order 80，渲染 null）', () => {
     const regs = slots.get('sidebar.footer.action') ?? []
     assert.equal(regs.length, 2, `应有 2 个注册，实际 ${regs.length}`)
@@ -2439,9 +2432,22 @@ await (async () => {
     assert.equal(regs.length, 1, `应注册 sidebar.toggle.badge，实际 ${regs.length}`)
     return '1 个'
   })
-  test('控制器拿得到服务；没有活会话时渲染 null（不显示「进行中 0」）', () => {
+  test('控制器用 ctx.get 取四个服务（不碰 ctx.xxx / ctx.inject）', () => {
     const html = render(mount(component('sidebar.footer.action', 1).component))
+    for (const name of ['sessions', 'workspaces', 'uiWorkspace', 'uiSession']) {
+      assert.ok(requestedServices.includes(name), `应查询 ${name}，实际：${JSON.stringify([...new Set(requestedServices)])}`)
+    }
     assert.equal(html.includes('进行中'), false, `空态不该出现轨道：${html.slice(0, 200)}`)
+    return new Set(requestedServices).size + ' 个服务'
+  })
+  test('服务拿不到时也不能把 apply 炸掉（ctx 只有 get 且全返回 undefined）', () => {
+    const bare = {
+      slots: slotsApi,
+      effect() {},
+      get() { return undefined },
+    }
+    assert.doesNotThrow(() => entry.factory(requireStub).apply(bare), 'apply 不该抛')
+    return 'apply 未抛'
   })
 })()
 
