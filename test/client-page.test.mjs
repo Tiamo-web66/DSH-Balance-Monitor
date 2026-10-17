@@ -1353,12 +1353,13 @@ await (async () => {
     catch (error) { return `__THROW__${String(error?.message ?? error)}` }
   }
   // conversation.input.dock 注册了两个：index 0 = 本会话费用（order 4）、index 1 = 额度横条（order 5）
-  // conversation.composer.dock 也两个：index 0 = 本会话费用（order 8）、index 1 = 右下角角标（order 9）
+  // dock 位置挂在 conversation.input.left（工具行空位），不跟宿主底栏抢行
+  // conversation.composer.dock 只剩右下角角标
   const composerSession = component('conversation.input.dock', 0).component
   const headerSession = component('conversation.session.header.actions', 0).component
   const strip = component('conversation.input.dock', 1).component
-  const cornerDock = component('conversation.composer.dock', 0).component
-  const corner = component('conversation.composer.dock', 1).component
+  const cornerDock = component('conversation.input.left', 0).component
+  const corner = component('conversation.composer.dock', 0).component
   /**
    * 收集「按宿主 dock 列宽」的那层样式：判据是 `maxWidth` 里带宿主的
    * `--dsh-composer-card-max-width`（只有输入区附近那几条会有；标题栏那处不该有）。
@@ -1383,14 +1384,20 @@ await (async () => {
       assert.equal(dockIdle.includes('本会话'), false, '没有会话 id 就不该有这一行')
       return '¥2.1600 · 3 次 · 5.0M · 80.0%'
     })
-    // 输入框下方那条在宿主的 flex dock 里（`display:flex; justify-content:center`，不是 column flex，
-    // 块级子元素不会自动拉伸）：必须去掉 `margin: auto`，否则会缩成内容宽并在 dock 里居中。
-    test('输入框下方那条：吃同一套列宽、但不居中（贴会话内容列左边）', () => {
-      const rows = dockColumns(cornerDock, { sessionId: 'sess-parent' })
-      assert.equal(rows.length, 1, `应有且只有一行吃 dock 列宽：${rows.length}`)
-      assert.equal(rows[0].margin, '0', 'dock 里要靠拉伸而非 margin auto')
-      assert.ok(String(rows[0].width).startsWith('calc(100% -'), `宽度要减掉两侧留白：${rows[0].width}`)
-      return 'margin 0 · 同一套 --dsh-composer-* 列宽'
+    // dock 位置在输入栏工具行的空位里，最多占这行的 46%（跟着卡片宽走），
+    // 不能再写接近 100% 的宽度去盖住「+ / 权限 / 模型」或把底栏的百分比顶走。
+    test('输入栏中间那条：最多占半行，窄了省略，不抢宿主控件', () => {
+      const rows = []
+      walk(mount(cornerDock, { sessionId: 'sess-parent' }), node => {
+        const style = node.props?.style
+        if (style?.textOverflow === 'ellipsis' && style?.flex === '0 1 auto') rows.push(style)
+      })
+      assert.equal(rows.length, 1, `应有且只有一行按比例分宽：${rows.length}`)
+      assert.equal(rows[0].minWidth, 0, '窄屏要允许收缩')
+      assert.ok(String(rows[0].maxWidth).includes('46cqw'), `宽度要跟容器走，不能写死像素：${rows[0].maxWidth}`)
+      assert.equal(rows[0].whiteSpace, 'nowrap')
+      assert.equal(rows[0].width, undefined, '不能再写死 calc(100% - …)')
+      return '46cqw · 窄屏省略 · 底栏留给宿主'
     })
     SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
     await reloadSidebar()
@@ -2169,7 +2176,7 @@ console.log('\n[侧栏：隐藏今日消耗的边界 / 角标只藏金额 / 横�
 await (async () => {
   const sidebar = component('sidebar.footer.action')
   const strip = component('conversation.input.dock', 1).component
-  const corner = component('conversation.composer.dock', 1).component
+  const corner = component('conversation.composer.dock', 0).component
   const saved = {
     // 注意：不能用 `SIDEBAR.modelCard` —— 前面那节把它复位成了 `undefined`（见 MODEL_CARD_FIXTURE 注释）
     modelCard: MODEL_CARD_FIXTURE, ui: SIDEBAR.ui, corner: SIDEBAR.corner,
