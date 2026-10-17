@@ -380,6 +380,17 @@ const sessionOverrides = new Map()
  * 用例要验「宿主按供应商过滤后一把都没剩」时把它设成 `keys: []` 的那份。
  */
 let keysOverride = null
+/**
+ * `/keys/balances` 的响应覆盖。默认两把 key 各有一笔官方余额（第二把已用尽），
+ * 用来锁住「密钥行右侧显示余额」。
+ */
+let keysBalanceOverride = null
+const DEFAULT_KEY_BALANCES = {
+  keys: [
+    { ref: 'DEEPSEEK_API_KEY', amount: 20.69, currency: 'CNY', isAvailable: true },
+    { ref: 'DEEPSEEK_API_KEY_2', amount: -0.34, currency: 'CNY', isAvailable: false },
+  ],
+}
 /** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
 function sessionFixtureOf(path) {
   const id = /sessionId=([^&]*)/.exec(path)?.[1] ?? ''
@@ -390,6 +401,7 @@ globalThis.fetch = async (url, init) => {
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
+    : path.includes('/keys/balances') ? { ok: true, data: keysBalanceOverride ?? DEFAULT_KEY_BALANCES }
     : path.includes('/keys') ? { ok: true, data: keysOverride ?? KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
@@ -1962,6 +1974,22 @@ await (async () => {
       assert.equal(item.node.props.style.gridTemplateColumns, 'auto minmax(0, 1fr)')
     }
     return `grid-template-columns: ${grids[0].node.props.style.gridTemplateColumns}`
+  })
+  test('密钥行右侧显示余额，用尽的 key 用警示色；有「查询余额」按钮', () => {
+    // 打开卡片就会查一次。假渲染器每次挂载都会重跑 effect，截到的是「读取中…」而不是空闲文案。
+    const query = pairs.find(item => item.node.type === 'button' && (item.text === '查询余额' || item.text === '读取中…'))
+    assert.ok(query !== undefined, `找不到「查询余额」：${pairs.map(i => i.text).filter(Boolean).slice(0, 24).join(' | ')}`)
+    const amounts = pairs.filter(item => item.text === '¥20.69' || item.text === '¥-0.34')
+    assert.equal(amounts.length, 2, `两把 key 各该有余额，实际 ${JSON.stringify(amounts.map(i => i.text))}`)
+    const fresh = amounts.find(item => item.text === '¥20.69')
+    const dry = amounts.find(item => item.text === '¥-0.34')
+    assert.equal(fresh.node.props.style.marginLeft, 'auto', '余额要贴在行的右侧')
+    assert.equal(dry.node.props.style.marginLeft, 'auto')
+    assert.match(String(dry.node.props.style.color), /label-error|#d33/, '用尽的 key 余额要用警示色')
+    const code = pairs.find(item => item.node.type === 'code')
+    assert.equal(code.parent, fresh.parent, '余额和打码值在同一行，才落在截图里右侧那块空位')
+    assert.equal(/主 key|已配置/.test(fresh.parent.text), false, '余额不该把状态文案拽回值那一行')
+    return `¥20.69 · ¥-0.34 · 查询余额`
   })
   // 宿主按供应商过滤后一把都没剩（用户还没配）：界面要明确说清，且**不本地补一份候选名**
   keysOverride = { provider: 'deepseek-official', primaryRef: 'DEEPSEEK_API_KEY', nextRef: 'DEEPSEEK_KEY', scanned: 0, keys: [] }

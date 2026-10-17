@@ -96,6 +96,11 @@ globalThis.fetch = async (url, init) => {
   if (String(url).includes('/user/balance')) {
     // 两把 key 给不同余额：用来验证「总额相加 + 明细逐条」
     const auth = String(init?.headers?.authorization ?? '')
+    if (auth.includes('sk-invalid')) {
+      return new Response(JSON.stringify({
+        error: { message: 'Authentication Fails', type: 'authentication_error' },
+      }), { status: 401, headers: { 'content-type': 'application/json' } })
+    }
     const isDry = auth.includes('sk-key-dry')
     const isSecond = auth.includes('sk-key-two')
     return new Response(JSON.stringify({
@@ -1641,6 +1646,48 @@ await test('PUT /keys：写入第二把 key（值只上行，引用名自动顺�
   const official = balances.find(item => item.provider === 'deepseek-official')
   assert.ok(official.keys.some(key => key.ref === 'DEEPSEEK_API_KEY_3'), JSON.stringify(official.keys?.map(k => k.ref)))
   return `写入 ${credentials.setCalls.at(-1).ref} → 计入余额明细`
+})
+
+await test('PUT /keys：无效 key 不写入', async () => {
+  const credentials = ctx.get('credentials')
+  const before = credentials.setCalls.length
+  const res = await call('PUT', '/plugins/dsh-balance-monitor/keys', {
+    provider: 'deepseek-official', value: 'sk-invalid', ref: 'DEEPSEEK_API_KEY_8',
+  })
+  assert.equal(res.statusCode, 400, JSON.stringify(res.json))
+  assert.match(String(res.json.error), /未保存/)
+  assert.match(String(res.json.error), /API Key 无效/)
+  assert.equal(credentials.setCalls.length, before, '无效 key 不该调用 credentials.set')
+  assert.equal(JSON.stringify(res.json).includes('sk-invalid'), false, '拒绝响应也不该回传 key 值')
+  const state = JSON.parse(readFileSync(join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json'), 'utf8'))
+  assert.equal((state.deepseekKeys ?? []).some(entry => entry.ref === 'DEEPSEEK_API_KEY_8'), false, '无效 key 不该记进 deepseekKeys')
+  return '401 → 未保存'
+})
+
+await test('PUT /keys：余额为负的 key 仍然有效，允许保存', async () => {
+  const res = await call('PUT', '/plugins/dsh-balance-monitor/keys', {
+    provider: 'deepseek-official', value: 'sk-key-dry', ref: 'DEEPSEEK_API_KEY_8',
+  })
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json).slice(0, 240))
+  assert.deepEqual(ctx.get('credentials').setCalls.at(-1), { ref: 'DEEPSEEK_API_KEY_8', value: 'sk-key-dry' })
+  await call('DELETE', '/plugins/dsh-balance-monitor/keys', { provider: 'deepseek-official', ref: 'DEEPSEEK_API_KEY_8' })
+  return '负余额仍写入，测完删掉'
+})
+
+await test('POST /keys/balances：每把已配置 key 的余额，不含值', async () => {
+  const res = await call('POST', '/plugins/dsh-balance-monitor/keys/balances', { provider: 'deepseek-official' })
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json).slice(0, 300))
+  const keys = res.json.data.keys
+  const primary = keys.find(item => item.ref === 'DEEPSEEK_API_KEY')
+  const second = keys.find(item => item.ref === 'DEEPSEEK_API_KEY_2')
+  assert.equal(primary?.amount, 0.01, JSON.stringify(keys))
+  assert.equal(primary?.currency, 'CNY')
+  assert.equal(primary?.isAvailable, true)
+  assert.equal(second?.amount, 1.5)
+  assert.equal(JSON.stringify(res.json).includes('sk-'), false, '余额接口不该回传任何 key 值')
+  const refused = await call('POST', '/plugins/dsh-balance-monitor/keys/balances', { provider: 'walk-grok' })
+  assert.equal(refused.statusCode, 404)
+  return `主 key ¥${primary.amount} · 第二把 ¥${second.amount}`
 })
 
 await test('DELETE /keys：删额外 key 可以，删主 key 被拒', async () => {
