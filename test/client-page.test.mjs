@@ -1802,7 +1802,7 @@ await (async () => {
     assert.ok(opened.includes('DEEPSEEK_API_KEY'), '应列出第一把 key 的引用名')
     assert.ok(opened.includes('第二把'), '应列出第二把 key 的标签')
     assert.ok(opened.includes('¥1.5000') || opened.includes('¥1.50'), `应显示第二把 key 的余额：${opened.slice(0, 300)}`)
-    assert.ok(opened.includes('(2 把 key)'), '多把 key 时应在余额行标注把数')
+    assert.equal(opened.includes('把 key'), false, '余额行不再显示 (N 把 key) / 使用中；明细里才展开')
     return '明细：2 条路线 + 2 把 key'
   })
   test('明细里点「DeepSeek Account」→ 切到账号路线（金额与 localStorage 都变）', () => {
