@@ -407,6 +407,7 @@ globalThis.fetch = async (url, init) => {
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys/balances')
       ? (keysBalanceMissing ? { ok: false, error: 'not found' } : { ok: true, data: keysBalanceOverride ?? DEFAULT_KEY_BALANCES })
+    : path.includes('/keys/reveal') ? { ok: true, data: { value: 'sk-copy-me' } }
     : path.includes('/keys') ? { ok: true, data: keysOverride ?? KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
@@ -1939,6 +1940,42 @@ await (async () => {
     // 说明：密钥行要等 KeyEditor 的异步回填，本假渲染器对「嵌套组件 + 异步」支持不足，
     // 所以这里只断言「没有预取明文」；眼睛按钮与行内容的正确性由宿主用例 + 真实页面确认。
     return `${input.props.type} 输入框 · 未预取明文 · 已识别 ${eye.length} 个眼睛按钮`
+  })
+  await tick()
+  await tick()
+  const iconTree = mount(Component, { provider: { provider: 'deepseek-official', settingsNs: 'llm-deepseek' } })
+  const eyeButtons = []
+  const copyButtons = []
+  walk(iconTree, node => {
+    if (node.type !== 'button') return
+    const label = node.props?.['aria-label']
+    if (label === '显示密钥' || label === '隐藏密钥') eyeButtons.push(node)
+    if (label === '复制 key') copyButtons.push(node)
+  })
+  const buttonHasSvg = button => {
+    let svg = false
+    walk(button, node => { if (node.type === 'svg') svg = true })
+    return svg
+  }
+  let written = null
+  if (copyButtons.length > 0) {
+    const savedNavigator = globalThis.navigator
+    globalThis.navigator = { language: 'zh-CN', clipboard: { writeText(text) { written = text; return Promise.resolve() } } }
+    try {
+      copyButtons[0].props.onClick()
+      await new Promise(resolve => setTimeout(resolve, 10))
+    } finally {
+      globalThis.navigator = savedNavigator
+    }
+  }
+  test('密钥行：眼睛是 SVG 小图标；复制按钮走 reveal + clipboard，且不自动揭码', () => {
+    assert.ok(eyeButtons.length > 0, '密钥行应有眼睛按钮')
+    assert.ok(eyeButtons.every(buttonHasSvg), '眼睛应是 SVG，不是猴子 emoji')
+    assert.ok(copyButtons.length > 0, '密钥行应有复制按钮')
+    assert.ok(copyButtons.every(buttonHasSvg), '复制按钮应是图标')
+    assert.equal(written, 'sk-copy-me', '复制按钮应把 /keys/reveal 的值写进剪贴板')
+    assert.ok(render(iconTree).includes('••••••••'), '复制后仍保持打码（不自动揭开）')
+    return `${eyeButtons.length} 个眼睛 · ${copyButtons.length} 个复制按钮`
   })
   test('非 DeepSeek 路线不显示密钥编辑区', () => {
     const htmlOther = render(mount(Component, { provider: { provider: 'walk-grok', settingsNs: 'llm-pi-ai' } }))
