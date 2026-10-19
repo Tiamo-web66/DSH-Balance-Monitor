@@ -459,7 +459,26 @@ const ctx = {
   effect(fn, label) { effects.push({ fn, label }) },
   get(name) { requestedServices.push(name); return railServices[name] },
 }
-entry.factory(requireStub).apply(ctx)
+/**
+ * `apply` 里会往 `document.head` 注入一份「侧栏底部独占一行」的样式。
+ * 这个用例只截获那一次注入，随后把 `document` 删掉 —— 后面的渲染用例
+ * 仍是纯 React 树，不依赖 DOM，也避免半截 DOM 替身把别的分支带坏。
+ */
+const injectedStyles = []
+Object.defineProperty(globalThis, 'document', {
+  configurable: true,
+  writable: true,
+  value: {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, textContent: '' }),
+    head: { appendChild(tag) { injectedStyles.push(tag) } },
+  },
+})
+try {
+  entry.factory(requireStub).apply(ctx)
+} finally {
+  delete globalThis.document
+}
 
 /**
  * `/session` 的响应夹具：`includeSubagent` 打开时多出「子代理」那一档、合计跟着变大。
@@ -2452,6 +2471,30 @@ await (async () => {
     SIDEBAR.credits = saved.credits
     SIDEBAR.providers = saved.providers
   }
+})()
+
+console.log('\n[侧栏：底部块独占一行（兼容其他 footer 插件）]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  test('余额块根节点自己占满一行（flex-basis / width 100% + border-box）', () => {
+    let root = null
+    walk(mount(sidebar.component), node => {
+      if (node.props?.['data-balance-monitor'] === 'sidebar') root = node
+    })
+    assert.ok(root !== null, '应渲染余额块根节点')
+    assert.equal(root.props.style.flexBasis, '100%', 'flex-basis 应是 100%（独占一行）')
+    assert.equal(root.props.style.width, '100%', '宽度应是 100%')
+    assert.equal(root.props.style.boxSizing, 'border-box', '左右 padding 不能把整行撑出侧栏')
+    return 'flex-basis 100% · border-box'
+  })
+  test('注入样式给宿主 footer 打开 flex-wrap（:has 从数据标记反选父容器）', () => {
+    const tag = injectedStyles.find(item => item?.dataset?.pluginCss === 'dsh-balance-monitor/sidebar-footer.css')
+    assert.ok(tag !== undefined, `应注入侧栏底部样式，实际：${JSON.stringify(injectedStyles.map(item => item?.dataset))}`)
+    assert.match(tag.textContent, /:has\(>\s*\[data-slot="sidebar\.footer\.action"\]/)
+    assert.match(tag.textContent, /:has\(>\s*\[data-balance-monitor="sidebar"\]\)/)
+    assert.match(tag.textContent, /flex-wrap:\s*wrap/)
+    return 'footer 可换行 · 余额块落到下一行'
+  })
 })()
 
 console.log('\n[侧栏：进行中轨道的注册链]')
