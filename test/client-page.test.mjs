@@ -2497,7 +2497,7 @@ await (async () => {
   })
 })()
 
-console.log('\n[侧栏：进行中轨道的注册链]')
+console.log('\n[侧栏：进行中 / 待查看轨道的注册链]')
 await (async () => {
   test('footer 里两块：余额条（order 10）+ 轨道控制器（order 80，渲染 null）', () => {
     const regs = slots.get('sidebar.footer.action') ?? []
@@ -2528,6 +2528,243 @@ await (async () => {
     }
     assert.doesNotThrow(() => entry.factory(requireStub).apply(bare), 'apply 不该抛')
     return 'apply 未抛'
+  })
+})()
+
+console.log('\n[侧栏：进行中 / 待查看两段真的渲染]')
+await (async () => {
+  /**
+   * 轨道控制器返回 null，真正的 DOM 由 effect 直接插到工作区列表上方。
+   * 这里搭一个只够轨道用的 DOM：树 / 滚动区 / 侧栏根，加上 style 与
+   * MutationObserver 替身；不引 jsdom，也不碰真实宿主。
+   */
+  class FakeElement {
+    constructor(tagName) {
+      this.tagName = tagName
+      this.children = []
+      this.parentElement = null
+      this.attributes = {}
+      this.dataset = {}
+      this.className = ''
+      this.textContent = ''
+      this.id = ''
+      this.title = ''
+      this.type = ''
+      this.role = null
+      this.listeners = new Map()
+    }
+    get nextElementSibling() {
+      if (this.parentElement === null) return null
+      const index = this.parentElement.children.indexOf(this)
+      return this.parentElement.children[index + 1] ?? null
+    }
+    get previousElementSibling() {
+      if (this.parentElement === null) return null
+      const index = this.parentElement.children.indexOf(this)
+      return index <= 0 ? null : this.parentElement.children[index - 1]
+    }
+    appendChild(child) {
+      if (child.parentElement !== null) child.remove()
+      this.children.push(child)
+      child.parentElement = this
+      return child
+    }
+    append(...nodes) { for (const node of nodes) this.appendChild(node) }
+    insertBefore(child, reference) {
+      if (child.parentElement !== null) child.remove()
+      const index = this.children.indexOf(reference)
+      this.children.splice(index < 0 ? this.children.length : index, 0, child)
+      child.parentElement = this
+      return child
+    }
+    replaceChildren(...nodes) {
+      for (const child of [...this.children]) child.remove()
+      for (const node of nodes) this.appendChild(node)
+    }
+    remove() {
+      if (this.parentElement === null) return
+      const index = this.parentElement.children.indexOf(this)
+      if (index >= 0) this.parentElement.children.splice(index, 1)
+      this.parentElement = null
+    }
+    setAttribute(name, value) {
+      const text = String(value)
+      this.attributes[name] = text
+      if (name === 'id') this.id = text
+      if (name === 'class') this.className = text
+      if (name === 'role') this.role = text
+    }
+    getAttribute(name) {
+      if (name === 'id') return this.id || null
+      if (name === 'class') return this.className || null
+      if (name === 'role') return this.role
+      return this.attributes[name] ?? null
+    }
+    addEventListener(name, handler) {
+      const list = this.listeners.get(name) ?? []
+      list.push(handler)
+      this.listeners.set(name, list)
+    }
+    click() {
+      for (const handler of this.listeners.get('click') ?? []) {
+        handler({ preventDefault() {}, stopPropagation() {} })
+      }
+    }
+    findDescendant(predicate) {
+      for (const child of this.children) {
+        if (predicate(child)) return child
+        const nested = child.findDescendant(predicate)
+        if (nested !== null) return nested
+      }
+      return null
+    }
+    querySelector(selector) {
+      if (selector === '[data-row-key]') {
+        return this.findDescendant(element => element.attributes['data-row-key'] !== undefined)
+      }
+      if (selector === 'input') return this.findDescendant(element => element.tagName === 'input')
+      return null
+    }
+    querySelectorAll() { return [] }
+    closest(selector) {
+      let node = this
+      while (node !== null) {
+        if (selector === '[role="tree"]' && node.role === 'tree') return node
+        node = node.parentElement
+      }
+      return null
+    }
+    getBoundingClientRect() {
+      return { width: 320, height: 600, top: 0, left: 0, right: 320, bottom: 600 }
+    }
+  }
+
+  const allNodes = []
+  const panel = new FakeElement('div')
+  const listArea = new FakeElement('div')
+  const placeholder = new FakeElement('div')
+  const tree = new FakeElement('div')
+  const treeRow = new FakeElement('div')
+  tree.setAttribute('role', 'tree')
+  treeRow.setAttribute('data-row-key', 'workspace:ws-1')
+  treeRow.setAttribute('aria-expanded', 'false')
+  panel.appendChild(placeholder)
+  panel.appendChild(listArea)
+  listArea.appendChild(tree)
+  tree.appendChild(treeRow)
+  let workspaceExpanded = 0
+  treeRow.addEventListener('click', () => { workspaceExpanded += 1 })
+
+  const head = new FakeElement('head')
+  const body = new FakeElement('body')
+  allNodes.push(panel, listArea, placeholder, tree, treeRow, head, body)
+  const styleTagOf = selector => {
+    const match = /data-plugin-css="([^"]+)"/.exec(selector)
+    if (match === null) return null
+    return head.children.find(tag => tag.dataset.pluginCss === match[1]) ?? null
+  }
+  const documentNode = {
+    head,
+    body,
+    createElement(tagName) {
+      const element = new FakeElement(tagName)
+      allNodes.push(element)
+      return element
+    },
+    getElementById(id) { return allNodes.find(element => element.id === id) ?? null },
+    querySelector(selector) {
+      if (selector.includes('data-row-key')) return treeRow
+      if (selector.includes('listArea')) return listArea
+      if (selector.startsWith('style[')) return styleTagOf(selector)
+      return null
+    },
+    querySelectorAll() { return [] },
+  }
+
+  const storage = new Map()
+  const writes = []
+  Object.defineProperty(globalThis, 'document', { configurable: true, writable: true, value: documentNode })
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: {
+      getItem: key => storage.get(key) ?? null,
+      setItem: (key, value) => { storage.set(key, String(value)); writes.push({ key, value: String(value) }) },
+      removeItem: key => storage.delete(key),
+    },
+  })
+  globalThis.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+  }
+  globalThis.requestAnimationFrame = handler => { handler(); return 1 }
+  globalThis.cancelAnimationFrame = () => {}
+
+  railServices.sessions.list = fakeSnapshotStore({
+    ids: ['run-1', 'done-1'],
+    byId: {
+      'run-1': { id: 'run-1', title: 'Running task', running: true, updatedAt: 3, retainedBy: {} },
+      'done-1': { id: 'done-1', title: 'Done task', running: false, updatedAt: 2, retainedBy: {} },
+    },
+    phase: 'ready',
+    projectionsBySession: {},
+  })
+  railServices.workspaces.list = fakeSnapshotStore({
+    items: [{ workspaceId: 'ws-1', title: 'Alpha', path: 'D:/alpha', sessionIds: ['run-1', 'done-1'] }],
+    archivedSessionIds: [],
+  })
+  railServices.uiSession.sessionStatus = fakeSnapshotStore(new Map([
+    ['run-1', { running: true }],
+    ['done-1', { running: false, completionUnread: true }],
+  ]))
+  const opened = []
+  railServices.uiWorkspace.openSession = id => { opened.push(id) }
+
+  mount(component('sidebar.footer.action', 1).component)
+  const host = documentNode.getElementById('dsh-bm-rr-host')
+
+  test('两段顺序：进行中在上，待查看在下，host 插在滚动区前', () => {
+    assert.ok(host !== null, '轨道 host 应被插入')
+    assert.equal(host.children.length, 2)
+    assert.equal(host.children[0].children[0].children[1].textContent, '进行中')
+    assert.equal(host.children[1].children[0].children[1].textContent, '待查看')
+    assert.equal(host.nextElementSibling, listArea)
+    return '进行中 / 待查看'
+  })
+  test('待查看行用绿点 + 标题 + 工作区，aria-label 带「已完成，待查看」', () => {
+    const section = host.children[1]
+    const row = section.children[1]
+    assert.equal(row.children[0].className, 'dsh-bm-rr-done')
+    assert.equal(row.children[1].textContent, 'Done task')
+    assert.equal(row.children[2].textContent, 'Alpha')
+    assert.equal(row.getAttribute('aria-label'), 'Done task · Alpha · 已完成，待查看')
+    const style = head.children.find(tag => tag.dataset.pluginCss?.includes('running-rail.css'))
+    assert.ok(style !== undefined)
+    assert.ok(style.textContent.includes('.dsh-bm-rr-done'))
+    return '绿点 + 标题 + Alpha'
+  })
+  test('两段各自折叠：折叠待查看不影响进行中，折叠状态写不同 key', () => {
+    host.children[1].children[0].click()
+    assert.equal(host.children[1].children[0].getAttribute('aria-expanded'), 'false')
+    assert.equal(host.children[1].children.length, 1, '折叠后只留标题行')
+    assert.equal(host.children[1].children[0].children[4].children.length, 1, '折叠标题显示绿点')
+    assert.equal(host.children[0].children[0].getAttribute('aria-expanded'), 'true', '进行中不受影响')
+    assert.ok(writes.some(item => item.key === 'balance-monitor:completed-rail-collapsed' && item.value === '1'))
+
+    host.children[0].children[0].click()
+    assert.equal(host.children[0].children[0].getAttribute('aria-expanded'), 'false')
+    assert.ok(writes.some(item => item.key === 'balance-monitor:running-rail-collapsed' && item.value === '1'))
+
+    host.children[1].children[0].click()
+    assert.equal(host.children[1].children[0].getAttribute('aria-expanded'), 'true')
+    assert.equal(host.children[1].children.length, 2, '展开后恢复行')
+    return '两把 key · 互不影响'
+  })
+  test('点待查看行打开会话，并顺手展开所属工作区', () => {
+    host.children[1].children[1].click()
+    assert.deepEqual(opened, ['done-1'])
+    assert.equal(workspaceExpanded, 1)
+    return 'openSession + 展开工作区'
   })
 })()
 
