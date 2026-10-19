@@ -365,6 +365,11 @@ LiteLLM 的 `model_prices_and_context_window.json` 算的（它仓库里有镜�
 | 峰谷表 | `峰谷表 · 预览 · 6` → 展开列出接下来的切换点（本地时刻 + `→ 高峰` / `→ 平价` + 相对倒计时） | `upcomingSwitches()`（默认 6 个，最多 24），宿主算好随 `/sidebar` 一起下发 |
 | 价格表 | `价格表 · MM-DD ⟳ 更新` → 点一下抓最新站方价目（结果就地报「价目已更新 · N 个模型」） | 宿主 `/prices/update` |
 
+**独占一行**：宿主的 footer 是横向 flex；装了也会注册 footer 的插件（例如 dsh-mobile 的
+「移动访问」）后，余额块会换到下一行并占满整行，不再和按钮左右分列；没有别的 footer
+插件时同样保持整行。实现见 `ensureSidebarFooterCss()`（用 `:has()` 从
+`data-balance-monitor="sidebar"` 反选父容器并打开 `flex-wrap`）。
+
 **哪几行默认不显示**：最后那两行（`峰谷表` / `价格表`）是**去改配置的入口**，不是用量 ——
 默认不渲染，侧栏那点位置留给余额 / 今日 / 峰谷倒计时。同一件事在设置页「余额与费用」里都有：
 更新价目在「价格」页；「峰谷表」（接下来 6 个切换点，读 `/report` 的同一份 `peak.upcoming`）在
