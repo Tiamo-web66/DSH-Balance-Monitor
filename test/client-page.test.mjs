@@ -2495,6 +2495,16 @@ await (async () => {
     assert.match(tag.textContent, /flex-wrap:\s*wrap/)
     return 'footer 可换行 · 余额块落到下一行'
   })
+  test('折叠侧栏 / 移动端 56px 抽屉（wide=false）整块不渲染，展开后恢复', () => {
+    const hiddenTree = mount(sidebar.component, { wide: false })
+    assert.equal(render(hiddenTree), '', '窄栏不该渲染余额块')
+    let root = null
+    walk(mount(sidebar.component, { wide: true }), node => {
+      if (node.props?.['data-balance-monitor'] === 'sidebar') root = node
+    })
+    assert.ok(root !== null, '宽栏应渲染余额块')
+    return 'wide=false 隐藏 · wide=true 显示'
+  })
 })()
 
 console.log('\n[侧栏：进行中 / 待查看轨道的注册链]')
@@ -2671,7 +2681,9 @@ await (async () => {
       allNodes.push(element)
       return element
     },
-    getElementById(id) { return allNodes.find(element => element.id === id) ?? null },
+    // 浏览器 getElementById 只认还在文档树里的节点；这里用 parentElement 近似
+    // （host 被 remove 后 parent 为 null，不能再被查到）。
+    getElementById(id) { return allNodes.find(element => element.id === id && element.parentElement !== null) ?? null },
     querySelector(selector) {
       if (selector.includes('data-row-key')) return treeRow
       if (selector.includes('listArea')) return listArea
@@ -2765,6 +2777,25 @@ await (async () => {
     assert.deepEqual(opened, ['done-1'])
     assert.equal(workspaceExpanded, 1)
     return 'openSession + 展开工作区'
+  })
+  test('折叠侧栏（wide=false）撤掉轨道，展开后恢复', () => {
+    mount(component('sidebar.footer.action', 1).component, { wide: false })
+    assert.equal(documentNode.getElementById('dsh-bm-rr-host'), null, '窄栏不该留轨道 host')
+    mount(component('sidebar.footer.action', 1).component, { wide: true })
+    assert.ok(documentNode.getElementById('dsh-bm-rr-host') !== null, '宽栏应恢复轨道')
+    return 'wide=false 隐藏 · wide=true 恢复'
+  })
+  test('窄栏徽章合并进行中 + 待查看，标题分开写', () => {
+    let badge = null
+    walk(mount(component('sidebar.toggle.badge').component), node => {
+      if (typeof node.props?.className === 'string' && node.props.className.includes('dsh-bm-rr-toggle')) badge = node
+    })
+    assert.ok(badge !== null, '应渲染窄栏徽章')
+    assert.equal(render(badge), '2')
+    assert.equal(badge.props.title, '1 个进行中 · 1 个待查看')
+    assert.match(badge.props.className, /dsh-bm-rr-toggle/)
+    assert.doesNotMatch(badge.props.className, /is-done|is-warn/)
+    return '合计 2 · 标题分开'
   })
 })()
 
