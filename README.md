@@ -114,7 +114,8 @@
 - **多把 key**：宿主自己的 DeepSeek API Key 适配器只认一把（`apiKeyEnv` 是单值），想按多把 key 汇总
   就用 `deepseekKeys` 列引用（字符串或 `[{ ref, label }]`）——**侧栏余额 = 各把 key 之和**，
   币种不一致时不显示总额。没填 label 的引用会按名字派生一个短标签（`DEEPSEEK_API_KEY_2` → `API KEY 2`）。
-  ⚠️ 这里列出的 key **只用于查余额，不会被宿主拿去发请求**；宿主始终只用 `apiKeyEnv` 那一把。
+  ⚠️ 这里列出的 key **默认只用于查余额，不会被宿主拿去发请求**；只有你点明细里的「使用」
+  （或自动换 key 触发）时，插件才会把那一把的值写进宿主 `apiKeyEnv`，下一次请求生效。
   如果 `deepseekKeys` 没把 `apiKeyEnv` 列进去，侧栏总额就不会包含宿主真正在用的那把——
   主 key 扣到负数时，总额仍可能看着很高。
 - **自动换 key**（默认开，`state.json` 里 `"autoKeySwitch": false` 可关）：只对 **API Key 路线**
@@ -123,6 +124,9 @@
   把它的**值写进当前 `apiKeyEnv` 引用**（`credentials.set`）——下一次 `credentials.resolve()`
   立即看到新 key。被换下的 key 如果还有正余额，会先备份到 `DEEPSEEK_API_KEY_REPLACED`，不会丢。
   换完后侧栏明细里对应的 key 标「使用中」，并显示一行「主 key 已自动从 X 切到 Y」。
+  侧栏明细里每把**有正余额、官方可用**的非当前 key 右侧也有一个「使用」按钮：点一下立即把它
+  设为宿主当前 key（同一套备份规则，不受 `autoKeySwitch` 开关限制），不需要等自动切换；
+  手动切完显示「主 key 已切到 X（手动指定）」。
   如果宿主主 key 不在 `deepseekKeys` 里，明细会单独列一行「主 key · 使用中」——避免把
   7 把备用 key 的合计误当成宿主能用的余额。
   ⚠️ 侧栏点「DeepSeek」只决定**看哪份余额**；会话实际走哪条路线由模型选择器决定。
@@ -140,6 +144,9 @@
   拉一次值；该路由只认「属于这条路线」的引用（别的引用一律 403）。
 - 侧栏**余额行点一下就在两条之间切换**（`余额 · DeepSeek ⇄ ¥0.01` → `余额 · DeepSeek Account ⇄ ¥29.64`），
   选择记在 `localStorage['balance-monitor:sidebar-balance']`；只有一条路线时不可点（提示里说明）。
+- 侧栏明细按「**名称 | 状态 | 余额**」三列排：余额永远是最右一列、右对齐，负数在状态列标
+  「余额不足」而不是把金额挤到中间；`使用中` / `使用` 按钮 / `余额不足` 共用同一个状态列。
+  点「使用」是**真的切换宿主的实际 key**（写入凭据库），不只是换显示。
 - 账号路线的 token 由宿主服务签发（只有宿主拿得到），插件**不读**磁盘上的凭据值
   （唯一碰 `~/.dsh/.credentials.yaml` 的地方是上面那条「只取键名」）；
   平台端点失败时回落到推理域（同一 token 也认，但金额被官方四舍五入到 2 位），并标注来源
@@ -630,10 +637,12 @@ $DSH_HOME/storages/dsh-balance-monitor/prices.json    ← 站方口径价目（�
   且只沉淀与默认不同的字段。
 - `deepseekKeys`：多把 DeepSeek API Key 的**凭据引用**列表（字符串或 `{ ref, label }`），
   卡片上的密钥编辑区会自动维护它（**只有 API Key 路线有编辑区**，账号路线不渲染）；
-  侧栏余额 = 各把之和（币种不一致就不给总额）。
+  侧栏余额 = 各把之和（币种不一致就不给总额）。默认这些 key 只用于查余额；
+  侧栏明细点「使用」/ 自动换 key 才会把选中的那把写进宿主 `apiKeyEnv`。
 - `autoKeySwitch`：主 key 不可用时自动换到有余额的 key（默认 **开**；只有显式 `false` 才关）。
   只对 API Key 路线生效，且要求 `deepseekKeys` 里至少有一把别的 key；换 key 会写宿主凭据库
   （`credentials.set`），被换下的正余额 key 备份到 `DEEPSEEK_API_KEY_REPLACED`。
+  侧栏的「使用」是用户显式操作，不受这个开关限制。
 - `deepseekKeyPrefixes` / `deepseekKeyMaxIndex`：候选名探测的前缀与序号上限
   （默认 `DEEPSEEK_API_KEY`、`DEEPSEEK_KEY` × `_2…_9`），设置页「显示 → 密钥扫描」可改。
 - `scanCredentialsFile`：读 `~/.dsh/.credentials.yaml` 里 `refs:` 段的**键名**（不读值）来补全候选名。
@@ -690,6 +699,7 @@ GET    /plugins/dsh-balance-monitor/keys?provider=<id>     → { ok, data }（�
 PUT    /plugins/dsh-balance-monitor/keys { provider, value, ref?, label? } → 写入宿主凭据库
 DELETE /plugins/dsh-balance-monitor/keys { provider, ref } → 删掉一把（主 key 拒绝删）
 POST   /plugins/dsh-balance-monitor/keys/reveal { provider, ref } → 回**明文**（只认属于该路线的引用）
+POST   /plugins/dsh-balance-monitor/keys/active { provider, ref } → 手动指定宿主当前使用的 key（写 apiKeyEnv）
 GET    /plugins/dsh-balance-monitor/                        → 一张说明页（调试用）
 ```
 
