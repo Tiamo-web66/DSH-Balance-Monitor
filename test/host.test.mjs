@@ -1596,6 +1596,74 @@ await test('自动换 key：主 key 不可用时，请求前切到有余额的 _
   return '主 key -0.01 → _2 1.50'
 })
 
+await test('手动切 key：POST /keys/active 写入主 key，侧栏只标这一把使用中', async () => {
+  const credentials = ctx.get('credentials')
+  credentials.values.DEEPSEEK_API_KEY = 'sk-key-one'
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2'],
+  })
+  const primed = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data
+    .balances.find(item => item.provider === 'deepseek-official')
+  assert.equal(primed.activeKey?.ref, 'DEEPSEEK_API_KEY', '初始应标主 key')
+  const before = credentials.setCalls.length
+  const res = await call('POST', '/plugins/dsh-balance-monitor/keys/active', {
+    provider: 'deepseek-official',
+    ref: 'DEEPSEEK_API_KEY_2',
+  })
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json))
+  assert.equal(res.json.data?.activeRef, 'DEEPSEEK_API_KEY_2')
+  assert.equal(res.json.data?.switched, true)
+  assert.equal(JSON.stringify(res.json).includes('sk-key-two'), false, '响应不许带 key 值')
+  const writes = credentials.setCalls.slice(before)
+  assert.ok(writes.some(item => item.ref === 'DEEPSEEK_API_KEY' && item.value === 'sk-key-two'), JSON.stringify(writes))
+  assert.ok(
+    writes.some(item => item.ref === 'DEEPSEEK_API_KEY_REPLACED' && item.value === 'sk-key-one'),
+    '原 key 有正余额，应先备份',
+  )
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data
+  const official = sidebar.balances.find(item => item.provider === 'deepseek-official')
+  const active = official.keys.filter(key => key.active === true)
+  assert.equal(active.length, 1, `同值引用只能标一把使用中：${JSON.stringify(official.keys)}`)
+  assert.equal(active[0].ref, 'DEEPSEEK_API_KEY_2', '应标用户点的那把')
+  assert.equal(sidebar.keySwitch?.manual, true, '手动切换要带 manual 标记')
+  assert.equal(sidebar.keySwitch?.to, 'DEEPSEEK_API_KEY_2')
+  // 还原：主 key 写回 sk-key-one，后面的用例仍按初始夹具跑。
+  credentials.values.DEEPSEEK_API_KEY = 'sk-key-one'
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })
+  return 'DEEPSEEK_API_KEY → _2 · 只标一把'
+})
+
+await test('POST /keys/active：GET / 账号路线 / 别家引用都被拒', async () => {
+  const credentials = ctx.get('credentials')
+  credentials.values.DEEPSEEK_API_KEY = 'sk-key-one'
+  await call('POST', '/plugins/dsh-balance-monitor/config', {
+    deepseekKeys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_2'],
+  })
+  await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })
+  const get = await call('GET', '/plugins/dsh-balance-monitor/keys/active')
+  assert.equal(get.statusCode, 405)
+  const account = await call('POST', '/plugins/dsh-balance-monitor/keys/active', {
+    provider: 'deepseek-account',
+    ref: 'DEEPSEEK_API_KEY',
+  })
+  assert.equal(account.statusCode, 404)
+  const foreign = await call('POST', '/plugins/dsh-balance-monitor/keys/active', {
+    provider: 'deepseek-official',
+    ref: 'WALK_GROK_API_KEY',
+  })
+  assert.equal(foreign.statusCode, 403)
+  const notListed = await call('POST', '/plugins/dsh-balance-monitor/keys/active', {
+    provider: 'deepseek-official',
+    ref: 'DEEPSEEK_API_KEY_3',
+  })
+  assert.equal(notListed.statusCode, 403)
+  assert.equal(credentials.values.DEEPSEEK_API_KEY, 'sk-key-one', '被拒的请求不许改主 key')
+  await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
+  await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })
+  return '405 / 404 / 403'
+})
+
 await test('清空 key 列表 → 回到用路线自己的 apiKeyEnv（单把）', async () => {
   await call('POST', '/plugins/dsh-balance-monitor/config', { deepseekKeys: [] })
   const data = (await call('POST', '/plugins/dsh-balance-monitor/balance/refresh', { provider: 'deepseek-official' })).json.data

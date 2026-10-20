@@ -395,6 +395,9 @@ const DEFAULT_KEY_BALANCES = {
     { ref: 'DEEPSEEK_API_KEY_2', amount: -0.34, currency: 'CNY', isAvailable: false },
   ],
 }
+/** `/keys/active`：手动切换请求记录；`switchFail` 非空时让宿主返回失败。 */
+let switchRequests = []
+let switchFail = null
 /** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
 function sessionFixtureOf(path) {
   const id = /sessionId=([^&]*)/.exec(path)?.[1] ?? ''
@@ -404,6 +407,28 @@ globalThis.fetch = async (url, init) => {
   const path = String(url)
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
   if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
+  if (path.endsWith('/keys/active')) {
+    const body = init?.body ? JSON.parse(init.body) : {}
+    switchRequests.push({ path, method: init?.method ?? 'GET', body })
+    if (switchFail !== null) {
+      return new Response(JSON.stringify({ ok: false, error: switchFail }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    // 模拟宿主：主 key 的值换成目标那把 → 侧栏活动标记跟着走。
+    const official = SIDEBAR_BALANCE_FIRST
+    if (Array.isArray(official.keys)) {
+      for (const key of official.keys) delete key.active
+      const target = official.keys.find(key => key.ref === body.ref)
+      if (target !== undefined) target.active = true
+    }
+    SIDEBAR.keySwitch = { provider: body.provider, from: 'DEEPSEEK_API_KEY', to: body.ref, manual: true }
+    return new Response(JSON.stringify({ ok: true, data: { activeRef: body.ref, switched: true } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
   const json = path.endsWith('/state') ? { ok: true, state: STATE }
     : path.includes('/keys/balances')
       ? (keysBalanceMissing ? { ok: false, error: 'not found' } : { ok: true, data: keysBalanceOverride ?? DEFAULT_KEY_BALANCES })
@@ -1928,6 +1953,120 @@ await (async () => {
   // 侧栏那侧的「隐藏区块」没在这里单测：夹具是 JSON 深拷贝，改完要重新拉 /sidebar 才生效。
   // 只要 `/sidebar` 带 `ui`（host 用例已断言）并且组件按 `ui.hide*` 分支渲染，覆盖就够；
   // 真正的手点验证留到真宿主里做。
+})()
+
+console.log('\n[左侧栏：余额明细三列对齐 + 指定 key 使用]')
+await (async () => {
+  const sidebar = component('sidebar.footer.action')
+  /** store 已经加载过：改夹具后要让它重新取一次数。 */
+  const reloadSidebar = async () => {
+    dispatchWindowEvent('focus')
+    await tick()
+    await tick()
+  }
+  const savedKeys = SIDEBAR_BALANCE_FIRST.keys
+  const savedAmount = SIDEBAR_BALANCE_FIRST.amount
+  const savedKeySwitch = SIDEBAR.keySwitch
+  SIDEBAR_BALANCE_FIRST.amount = 135.27
+  SIDEBAR_BALANCE_FIRST.keys = [
+    { ref: 'DEEPSEEK_API_KEY_4', label: 'API KEY 4', amount: 110.15, currency: 'CNY', isAvailable: true, active: true },
+    { ref: 'DEEPSEEK_API_KEY_2', label: 'API KEY 2', amount: 25.17, currency: 'CNY', isAvailable: true },
+    { ref: 'DEEPSEEK_API_KEY_7', label: 'API KEY 7', amount: -0.05, currency: 'CNY', isAvailable: false },
+  ]
+  delete SIDEBAR.keySwitch
+  await reloadSidebar()
+  let tree = mount(sidebar.component)
+  if (!render(tree).includes('按 key 明细')) {
+    clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children).includes('余额'))
+    tree = mount(sidebar.component)
+  }
+  const rowOf = (key, source = tree) => {
+    let found = null
+    // 侧栏里同名的 React key 不止一处（供应商下拉的 <option> 也用 provider 当 key），
+    // 这里只认三列网格行本身。
+    walk(source, node => {
+      if (node.props?.key === key && node.props?.style?.display === 'grid') found = node
+    })
+    return found
+  }
+  const cellsOf = row => (Array.isArray(row?.props?.children) ? row.props.children : [row?.props?.children]).filter(Boolean)
+  const statusOf = row => cellsOf(row).find(cell => cell?.props?.style?.gridColumn === '2')
+  const amountOf = row => cellsOf(row).find(cell => cell?.props?.style?.gridColumn === '3')
+
+  await test('三列网格：头部 / 路线 / key 行共用列宽，金额全部落最右且右对齐', () => {
+    for (const key of ['balance', 'deepseek-official', 'DEEPSEEK_API_KEY_2', 'DEEPSEEK_API_KEY_7']) {
+      const row = rowOf(key)
+      assert.ok(row !== null, `找不到行 ${key}`)
+      assert.equal(row.props.style.display, 'grid', `${key} 应是网格行`)
+      assert.match(String(row.props.style.gridTemplateColumns), /46px/, `${key} 应带固定状态列`)
+      const amount = amountOf(row)
+      assert.ok(amount !== undefined, `${key} 应有余额单元格`)
+      assert.equal(amount.props.style.textAlign, 'right', `${key} 的余额应右对齐`)
+      assert.equal(amount.props.style.fontVariantNumeric, 'tabular-nums')
+    }
+    return 'grid · 状态 46px · 金额右对齐'
+  })
+
+  await test('状态列：使用中 / 使用按钮 / 余额不足 各占一行，且都在余额左边', () => {
+    const active = rowOf('DEEPSEEK_API_KEY_4')
+    assert.equal(render(statusOf(active)), '使用中')
+    const usable = rowOf('DEEPSEEK_API_KEY_2')
+    assert.equal(render(statusOf(usable)), '使用')
+    assert.equal(cellsOf(usable).at(-1), amountOf(usable), '余额必须是最右一列')
+    const dry = rowOf('DEEPSEEK_API_KEY_7')
+    assert.equal(render(statusOf(dry)), '余额不足')
+    assert.equal(render(amountOf(dry)), '¥-0.05')
+    assert.match(String(amountOf(dry).props.style.color), /warning|#b45309/, '负余额用警示色')
+    return '使用中 | 使用 | 余额不足 → 余额列'
+  })
+
+  // 客户端的 test() 是同步的：异步动作先在外面跑完，再进用例断言。
+  switchRequests = []
+  switchFail = null
+  const switchClicked = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '使用')
+  await tick()
+  await tick()
+  await tick()
+  const switchHit = switchRequests.at(-1)
+  const afterSwitchTree = mount(sidebar.component)
+  test('点「使用」→ POST /keys/active；成功后被点的这把变成「使用中」', () => {
+    assert.ok(switchClicked, '应能点到「使用」按钮')
+    assert.ok(switchHit !== undefined, '应发出切换请求')
+    assert.equal(switchHit.method, 'POST')
+    assert.deepEqual(switchHit.body, { provider: 'deepseek-official', ref: 'DEEPSEEK_API_KEY_2' })
+    assert.equal(render(statusOf(rowOf('DEEPSEEK_API_KEY_2', afterSwitchTree))), '使用中')
+    assert.equal(render(statusOf(rowOf('DEEPSEEK_API_KEY_4', afterSwitchTree))), '使用')
+    const afterHtml = render(afterSwitchTree)
+    assert.ok(afterHtml.includes('主 key 已切到 API KEY 2（手动指定）'), `应回显手动切换：${afterHtml.slice(-400)}`)
+    return 'POST { provider, ref } · 使用中移到 API KEY 2'
+  })
+
+  switchRequests = []
+  switchFail = '写入凭据失败：EACCES'
+  const failClicked = clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '使用')
+  await tick()
+  await tick()
+  await tick()
+  const failedHtml = render(mount(sidebar.component))
+  switchFail = null
+  test('切换失败 → 明细下方显示原因，按钮回到「使用」', () => {
+    assert.ok(failClicked, '应能点到「使用」按钮')
+    assert.ok(failedHtml.includes('切换失败：写入凭据失败：EACCES'), `应显示失败原因：${failedHtml.slice(-400)}`)
+    return '失败原因可见'
+  })
+
+  // 清掉 store 里残留的 switchError（成功后才会清）：再做一次成功切换，然后恢复夹具。
+  switchFail = null
+  clickIn(sidebar.component, node => node.type === 'button' && render(node.props?.children) === '使用')
+  await tick()
+  await tick()
+  await tick()
+  switchRequests = []
+  SIDEBAR_BALANCE_FIRST.keys = savedKeys
+  SIDEBAR_BALANCE_FIRST.amount = savedAmount
+  if (savedKeySwitch === undefined) delete SIDEBAR.keySwitch
+  else SIDEBAR.keySwitch = savedKeySwitch
+  await reloadSidebar()
 })()
 
 console.log('\n[供应商卡片：DeepSeek 的多把 key 编辑区]')
