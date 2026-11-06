@@ -252,8 +252,7 @@ const SIDEBAR = {
     ],
     total: { usd: 0.2144, amount: 1.5437, calls: 185, unpriced: 2 },
   },
-  // 输入区三块（T3）：宿主总是送补齐默认值的形状
-  sessionCost: { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false },
+  // 输入区两块：宿主总是送补齐默认值的形状
   quotaStrip: { enabled: false, showBalance: true },
   corner: { enabled: false, showTop1: false },
   // 预算进度（横条那格）：宿主按 budgetProgress 算好，占比 0.3982 → 39.8%
@@ -262,7 +261,7 @@ const SIDEBAR = {
 }
 /**
  * 模型花费卡片的原始夹具。
- * 「输入区三块」那节为了验「卡片关着时角标还显示 Top-1」把 `SIDEBAR.modelCard` 设成了 `null`，
+ * 「输入区两块」那节为了验「卡片关着时角标还显示 Top-1」把 `SIDEBAR.modelCard` 设成了 `null`，
  * 复位时用的是它自己那份 `saved`（里面**没有** modelCard 这一位）→ 之后它就一直是 `undefined`。
  * 后面的用例还要用这份卡片，所以在定义处先留一份原样的。
  */
@@ -363,18 +362,10 @@ globalThis.window = {
   dispatchEvent() {},
 }
 /**
- * `/session` 的响应闸门：命中 `match` 的请求先挂在这个 promise 上再回。
- * 默认 `null` = 不干预（不影响别的用例）；T3 的「换会话」用例用它造出
- * 「A 的响应还在飞、用户已经切到 B」这个时序。
- */
-let sessionGate = null
-/**
  * `/history/clear` 的响应覆盖：默认走夹具里那份「落盘成功」（`writeFailed: []`）。
  * 用例要验「落盘失败要如实提示」时把它设成带 `writeFailed` 的那份。
  */
 let historyClearOverride = null
-/** `sessionId` → 专用夹具（没登记的走通用 `sessionFixture`）。 */
-const sessionOverrides = new Map()
 /**
  * `/keys` 的响应覆盖：默认走 `KEYS`（两把 key）。
  * 用例要验「宿主按供应商过滤后一把都没剩」时把它设成 `keys: []` 的那份。
@@ -398,15 +389,9 @@ const DEFAULT_KEY_BALANCES = {
 /** `/keys/active`：手动切换请求记录；`switchFail` 非空时让宿主返回失败。 */
 let switchRequests = []
 let switchFail = null
-/** `/session` 的响应体：登记过的 id 用专用夹具，其余走通用夹具。 */
-function sessionFixtureOf(path) {
-  const id = /sessionId=([^&]*)/.exec(path)?.[1] ?? ''
-  return sessionOverrides.get(id) ?? sessionFixture(path.includes('includeSubagent=1'))
-}
 globalThis.fetch = async (url, init) => {
   const path = String(url)
   calls.push({ path, method: init?.method ?? 'GET', body: init?.body ?? null, headers: init?.headers ?? null })
-  if (sessionGate !== null && sessionGate.match.test(path)) await sessionGate.promise
   if (path.endsWith('/keys/active')) {
     const body = init?.body ? JSON.parse(init.body) : {}
     switchRequests.push({ path, method: init?.method ?? 'GET', body })
@@ -436,7 +421,6 @@ globalThis.fetch = async (url, init) => {
     : path.includes('/keys') ? { ok: true, data: keysOverride ?? KEYS }
     : path.includes('/history/import') ? { ok: true, data: { available: false, reason: '会话日志是分帧 zstd 存储，实测只解得出会话头一行', sessionsRoot: 'C:\\Users\\X\\.dsh\\sessions', projects: 7, sessionFiles: 23, zstd: true } }
     : path.includes('/history/clear') ? { ok: true, data: historyClearOverride ?? { ledgerDays: 12, records: 3456, rollupDays: 400, rollupUsd: 145.6, writeFailed: [] } }
-    : path.includes('/session?') ? { ok: true, data: sessionFixtureOf(path) }
     : path.endsWith('/report') ? { ok: true, data: REPORT }
     : path.endsWith('/sidebar') ? { ok: true, data: SIDEBAR }
       : path.endsWith('/prices/update') ? { ok: true, data: { meta: { ...REPORT.prices.meta, accepted: 320 } } }
@@ -503,41 +487,6 @@ try {
   entry.factory(requireStub).apply(ctx)
 } finally {
   delete globalThis.document
-}
-
-/**
- * `/session` 的响应夹具：`includeSubagent` 打开时多出「子代理」那一档、合计跟着变大。
- * 形状与宿主 `summarizeSession()` 一致：**金额是展示币种的数字**（`toDisplay()` 的返回值，
- * 币种符号由客户端 `formatAmount()` 补），`cost` 为 `null` = 这一档全未定价；
- * token 是 5 桶 + total。
- */
-function sessionFixture(includeSubagent) {
-  const self = {
-    calls: 3, priced: 3, unpriced: 0, usd: 0.3, amount: 2.16, cost: 2.16,
-    tokens: { input: 1_000_000, output: 0, cacheRead: 4_000_000, cacheWrite: 0, reasoning: 0, total: 5_000_000 },
-    hitRate: 0.8,
-    models: [{ key: 'walk-grok:cn:deepseek-v4.1-flash', provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', calls: 3, usd: 0.3, amount: 2.16 }],
-  }
-  const zero = {
-    calls: 0, priced: 0, unpriced: 0, usd: 0, amount: 0, cost: null,
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
-    hitRate: null, models: [],
-  }
-  const children = includeSubagent
-    ? {
-        ...self,
-        calls: 2, usd: 0.2, amount: 1.44, cost: 1.44,
-        tokens: { ...self.tokens, input: 500_000, total: 2_500_000 },
-        models: [{ key: 'walk-grok:cn:deepseek-v4.1-pro', provider: 'walk-grok', model: 'cn:deepseek-v4.1-pro', calls: 2, usd: 0.2, amount: 1.44 }],
-      }
-    : zero
-  const total = includeSubagent
-    ? { ...self, calls: 5, usd: 0.5, amount: 3.6, cost: 3.6, tokens: { ...self.tokens, input: 1_500_000, total: 7_500_000 } }
-    : self
-  return {
-    sessionId: 'sess-parent', date: '2026-10-13', includeSubagent: includeSubagent === true,
-    subagentSupported: true, self, children, total, firstAtMs: 1, lastAtMs: 2,
-  }
 }
 
 function component(name, index = 0) {
@@ -1457,38 +1406,28 @@ await (async () => {
   await reloadSidebar()
 })()
 
-console.log('\n[输入区三块：本会话费用 / 额度横条 / 右下角角标]')
+console.log('\n[输入区两块：额度横条 / 右下角角标]')
 await (async () => {
-  const saved = { sessionCost: SIDEBAR.sessionCost, quotaStrip: SIDEBAR.quotaStrip, corner: SIDEBAR.corner }
+  const saved = { quotaStrip: SIDEBAR.quotaStrip, corner: SIDEBAR.corner, modelCard: SIDEBAR.modelCard }
   const reloadSidebar = async () => {
     dispatchWindowEvent('focus')
     await tick()
     await tick()
   }
-  // 会话数据是异步取的：先挂一次把数据拉回来再渲染断言
-  //（`test()` 是同步的，await 只能放在调用 test 之前 —— 这是本文件的老坑）
-  const renderSession = async (Component, props) => {
-    mount(Component, props)
-    await tick()
-    await tick()
-    return render(mount(Component, props))
-  }
-  /** 同上，但把异常收成字符串返回 —— 「不抛错」这种断言才写得出来（否则会炸掉整个文件）。 */
-  const renderSafely = async (Component, props) => {
-    try { return await renderSession(Component, props) }
-    catch (error) { return `__THROW__${String(error?.message ?? error)}` }
-  }
-  // conversation.input.dock 注册了两个：index 0 = 本会话费用（order 4）、index 1 = 额度横条（order 5）
-  // dock 位置挂在 conversation.input.left（工具行空位），不跟宿主底栏抢行
-  // conversation.composer.dock 只剩右下角角标
-  const composerSession = component('conversation.input.dock', 0).component
-  const headerSession = component('conversation.session.header.actions', 0).component
-  const strip = component('conversation.input.dock', 1).component
-  const cornerDock = component('conversation.input.left', 0).component
+  test('会话区不再注册 token / 花费行', () => {
+    assert.equal(slots.has('conversation.session.header.actions'), false, '标题栏槽位不该再注册')
+    assert.equal(slots.has('conversation.input.left'), false, '输入栏工具行槽位不该再注册')
+    assert.equal((slots.get('conversation.input.dock') ?? []).length, 1,
+      '输入框上方只应剩额度横条一个注册')
+    assert.equal(calls.filter(call => call.path.includes('/session?')).length, 0,
+      '客户端不该再请求 /session')
+    return '会话槽位与 /session 请求均已移除'
+  })
+  const strip = component('conversation.input.dock', 0).component
   const corner = component('conversation.composer.dock', 0).component
   /**
    * 收集「按宿主 dock 列宽」的那层样式：判据是 `maxWidth` 里带宿主的
-   * `--dsh-composer-card-max-width`（只有输入区附近那几条会有；标题栏那处不该有）。
+   * `--dsh-composer-card-max-width`（只有输入区附近那几条会有）。
    */
   const dockColumns = (Component, props) => {
     const out = []
@@ -1499,101 +1438,6 @@ await (async () => {
     return out
   }
   try {
-    SIDEBAR.sessionCost = { enabled: true, position: 'dock', showHitRate: true, includeSubagent: false }
-    await reloadSidebar()
-    const dockHtml = await renderSession(cornerDock, { sessionId: 'sess-parent' })
-    const dockIdle = await renderSession(cornerDock, {})
-    test('位置=dock（输入框下方）→ 那一行该渲染；宿主没给 sessionId 就不渲染', () => {
-      for (const needle of ['本会话 ¥2.1600', '3 次', '5.0M tok', '命中 80.0%']) {
-        assert.ok(dockHtml.includes(needle), `缺少「${needle}」：${dockHtml.slice(0, 200)}`)
-      }
-      assert.equal(dockIdle.includes('本会话'), false, '没有会话 id 就不该有这一行')
-      return '¥2.1600 · 3 次 · 5.0M · 80.0%'
-    })
-    // dock 位置在输入栏工具行的空位里，最多占这行的 46%（跟着卡片宽走），
-    // 不能再写接近 100% 的宽度去盖住「+ / 权限 / 模型」或把底栏的百分比顶走。
-    test('输入栏中间那条：最多占半行，窄了省略，不抢宿主控件', () => {
-      const rows = []
-      walk(mount(cornerDock, { sessionId: 'sess-parent' }), node => {
-        const style = node.props?.style
-        if (style?.textOverflow === 'ellipsis' && style?.flex === '0 1 auto') rows.push(style)
-      })
-      assert.equal(rows.length, 1, `应有且只有一行按比例分宽：${rows.length}`)
-      assert.equal(rows[0].minWidth, 0, '窄屏要允许收缩')
-      assert.ok(String(rows[0].maxWidth).includes('46cqw'), `宽度要跟容器走，不能写死像素：${rows[0].maxWidth}`)
-      assert.equal(rows[0].whiteSpace, 'nowrap')
-      assert.equal(rows[0].width, undefined, '不能再写死 calc(100% - …)')
-      return '46cqw · 窄屏省略 · 底栏留给宿主'
-    })
-    SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
-    await reloadSidebar()
-    const composerHtml = await renderSession(composerSession, { sessionId: 'sess-parent' })
-    const headerIdle = await renderSession(headerSession, { sessionId: 'sess-parent' })
-    const dockIdleAgain = await renderSession(cornerDock, { sessionId: 'sess-parent' })
-    test('本会话费用：金额 / 调用数 / token / 命中率；位置=composer 时另两处不渲染', () => {
-      for (const needle of ['本会话 ¥2.1600', '3 次', '5.0M tok', '命中 80.0%']) {
-        assert.ok(composerHtml.includes(needle), `缺少「${needle}」：${composerHtml.slice(0, 200)}`)
-      }
-      assert.ok(!headerIdle.includes('本会话'), '位置=composer 时标题栏那处不该渲染')
-      assert.ok(!dockIdleAgain.includes('本会话'), '位置=composer 时输入框下方那处不该渲染')
-      return '¥2.1600 · 3 次 · 5.0M · 80.0%'
-    })
-    test('本会话费用那行按宿主的 dock 列宽居中（不再贴会话面板左边）', () => {
-      const rows = dockColumns(composerSession, { sessionId: 'sess-parent' })
-      assert.equal(rows.length, 1, `应有且只有一行吃 dock 列宽：${rows.length}`)
-      const style = rows[0]
-      assert.equal(style.margin, '0 auto', '要靠 margin auto 才能居中')
-      assert.ok(String(style.width).startsWith('calc(100% -'), `宽度要减掉两侧留白：${style.width}`)
-      assert.ok(String(style.width).includes('--dsh-composer-side-clearance'), `侧边留白要跟宿主一致：${style.width}`)
-      assert.ok(String(style.padding).includes('--dsh-composer-dock-inset'), `横向内缩要跟宿主 dock 一致：${style.padding}`)
-      return 'margin auto + 宿主 --dsh-composer-* 变量'
-    })
-    const noSession = await renderSession(composerSession, {})
-    test('宿主没给 sessionId（不是会话页）→ 不渲染', () => {
-      assert.equal(noSession.includes('本会话'), false, `没有会话 id 就不该有这一行：${noSession.slice(0, 120)}`)
-      return '不渲染'
-    })
-    SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: false, includeSubagent: true }
-    await reloadSidebar()
-    const agentHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
-    test('勾「包含子代理」→ 走 total 那一档，且关掉命中率后不再显示', () => {
-      assert.ok(agentHtml.includes('本会话 ¥3.6000'), `含子代理应给合计：${agentHtml.slice(0, 220)}`)
-      assert.ok(agentHtml.includes('5 次'), '合计调用数 5')
-      assert.ok(!agentHtml.includes('命中'), '关掉命中率后不该有它')
-      return '含子代理 → ¥3.6000 · 5 次'
-    })
-    SIDEBAR.sessionCost = { enabled: true, position: 'header', showHitRate: true, includeSubagent: false }
-    await reloadSidebar()
-    const headerHtml = await renderSession(headerSession, { sessionId: 'sess-parent' })
-    const composerIdle = await renderSession(composerSession, { sessionId: 'sess-parent' })
-    test('位置改到 header → 轮到标题栏那处渲染', () => {
-      assert.ok(headerHtml.includes('本会话'), `标题栏应该渲染：${headerHtml.slice(0, 200)}`)
-      assert.ok(!composerIdle.includes('本会话'), '输入区那处应收起')
-      return 'header 生效'
-    })
-    // 宿主会把两个槽位都挂上：没被选中的那一处不该跟着取数，也不该起自己的轮询定时器
-    //（15s 一次、每次 force 真发请求）；只数请求抓不到它 —— store 有 TTL 缓存会吃掉重复请求，
-    // 所以这里数**定时器**。数的是**累计起过多少个**，不是「当前未清理的」那个：
-    // 后者不单调 —— 配置一变 effect 会清掉旧的、起个新的，未清理数就会**变小**，
-    // 于是「挂载隐藏实例后数量不变」只要测量窗口跨过一次配置变更就假失败
-    //（实测单独跑绿、在 npm 门槛里 3/3 抖，就是环境差）。
-    const timersBefore = intervals.filter(item => item.ms === 15_000).length
-    const idleBefore = calls.filter(call => call.path.includes('/session?')).length
-    await renderSession(composerSession, { sessionId: 'sess-parent' })
-    const idleAfter = calls.filter(call => call.path.includes('/session?')).length
-    const timersAfter = intervals.filter(item => item.ms === 15_000).length
-    test('没被选中的那处不发请求、也不起 15 秒轮询定时器', () => {
-      assert.equal(idleAfter, idleBefore, `隐藏那处不该取数：${idleBefore} → ${idleAfter}`)
-      assert.equal(timersAfter, timersBefore, `隐藏那处不该起定时器：${timersBefore} → ${timersAfter}`)
-      return `隐藏处 0 请求 · 0 新定时器（累计起过 ${intervals.filter(item => item.ms === 15_000).length} 个 15s 定时器）`
-    })
-    // 这条**必须留在上面那条之后**：挂一次 header 那处会（重新）起一个 15 秒定时器，
-    // 排在前面会把「隐藏处不该起定时器」那条用例的 before/after 计数搞乱（实测 1 → 0）。
-    test('位置=header 时不吃输入区那套列宽（标题栏那行不许被压窄）', () => {
-      const rows = dockColumns(headerSession, { sessionId: 'sess-parent' })
-      assert.equal(rows.length, 0, `标题栏那处不该带 dock 列宽：${JSON.stringify(rows)}`)
-      return '标题栏不吃 dock 列宽'
-    })
     SIDEBAR.quotaStrip = { enabled: true, showBalance: true }
     SIDEBAR.corner = { enabled: true, showTop1: true }
     await reloadSidebar()
@@ -1630,111 +1474,10 @@ await (async () => {
       assert.ok(cornerNoCard.includes('Top-1 cn:deepseek-v4.1-flash'), `不该依赖模型卡片开关：${cornerNoCard.slice(0, 200)}`)
       return '独立于卡片开关'
     })
-    SIDEBAR.modelCard = saved.modelCard
-    await reloadSidebar()
-    SIDEBAR.quotaStrip = { enabled: false, showBalance: true }
-    SIDEBAR.corner = { enabled: false, showTop1: true }
-    SIDEBAR.sessionCost = { enabled: false, position: 'composer', showHitRate: true, includeSubagent: false }
-    await reloadSidebar()
-    const stripOff = render(mount(strip, {}))
-    const cornerOff = render(mount(corner, {}))
-    const sessionOff = await renderSession(composerSession, { sessionId: 'sess-parent' })
-    // 「三块关掉都不渲染」这条**仍然测不了**：侧栏 store 的 data 是宿主下发的快照，
-    // 组件读到的是上一次取数的那份（focus 重取在这个渲染器里对已挂载实例不生效），
-    // 于是断言拿到的还是旧档。开关语义由 host 用例覆盖（三个块的局部补丁 / 非法保持 / 全默认不留条），
-    // 这里不写假绿断言。
-    void sessionOff
-    void stripOff
-    void cornerOff
-
-    // ────────── 换会话：A 的请求还在飞时切到 B（P0：会话串数据）──────────
-    // 造时序：`sessionGate` 把 sess-A 的响应挂住，sess-B 的立刻回。
-    // 断言要点两条：B 渲染的是**自己的**数（不是 A 的），且切到 B 后确实为 B 发过请求。
-    SIDEBAR.sessionCost = { enabled: true, position: 'composer', showHitRate: true, includeSubagent: false }
-    let releaseA = () => {}
-    const gateA = new Promise(resolve => { releaseA = resolve })
-    /** 一档会话数据：金额取能一眼区分的数字（A=7 次 ¥9.8765 / B=2 次 ¥1.2345）。 */
-    const sessionNodeOf = (callsCount, amount, tokensTotal) => ({
-      calls: callsCount, priced: callsCount, unpriced: 0, usd: amount / 7.2, amount, cost: amount,
-      tokens: { input: tokensTotal, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: tokensTotal },
-      hitRate: 0.5, models: [],
-    })
-    const sessionCaseOf = (sessionId, self) => ({
-      sessionId, date: '2026-10-13', includeSubagent: false, subagentSupported: true,
-      self, children: self, total: self, firstAtMs: 1, lastAtMs: 2,
-    })
-    sessionOverrides.set('sess-A', sessionCaseOf('sess-A', sessionNodeOf(7, 9.8765, 9_000_000)))
-    sessionOverrides.set('sess-B', sessionCaseOf('sess-B', sessionNodeOf(2, 1.2345, 2_000_000)))
-    sessionGate = { match: /sessionId=sess-A/, promise: gateA }
-    await reloadSidebar()
-    // A 发出去了但响应还挂着 → 这一帧没有数据可画（不许拿别的档顶替）
-    const htmlA = await renderSession(composerSession, { sessionId: 'sess-A' })
-    const htmlB = await renderSession(composerSession, { sessionId: 'sess-B' })
-    const askedB = calls.filter(call => call.path.includes('sessionId=sess-B')).length
-    // 放行 A 的迟到响应：它已经不属于当前档，**不许**覆盖 B
-    releaseA()
-    await tick()
-    await tick()
-    sessionGate = null
-    const htmlBLate = render(mount(composerSession, { sessionId: 'sess-B' }))
-    test('换会话：A 在飞时切到 B，B 画的是 B 的钱（不是 A 的），且为 B 发了请求', () => {
-      assert.ok(htmlB.includes('本会话 ¥1.2345'), `B 应显示自己的金额：${htmlB.slice(0, 200)}`)
-      assert.ok(htmlB.includes('2 次'), `B 应显示自己的调用数：${htmlB.slice(0, 200)}`)
-      assert.ok(!htmlB.includes('9.8765'), `不许把 A 的金额画到 B 身上：${htmlB.slice(0, 200)}`)
-      assert.ok(askedB >= 1, `切到 B 后必须为 B 发请求，实际 ${askedB} 次`)
-      // A 响应还没回来的那一帧：没有数据就什么都不显示，不许拿别的档（或 0）顶上
-      assert.ok(!htmlA.includes('9.8765') && !htmlA.includes('1.2345'), `A 未回来时不该有金额：${htmlA.slice(0, 120)}`)
-      return `B 独立取数（sess-B 请求 ${askedB} 次）`
-    })
-    test('A 的迟到响应不落到 B 上（换 key 后响应先校验 key）', () => {
-      assert.ok(htmlBLate.includes('本会话 ¥1.2345'), `B 应保持自己的数：${htmlBLate.slice(0, 200)}`)
-      assert.ok(!htmlBLate.includes('9.8765'), `A 的迟到响应不许覆盖 B：${htmlBLate.slice(0, 200)}`)
-      return '迟到响应已丢弃'
-    })
-
-    // ────────── 未定价 ≠ 0 + 老宿主缺字段（P1）──────────
-    // 宿主对「这一档全未定价」给 `amount: 0` / `cost: null`（界面该显示 —，不是 ¥0）
-    sessionOverrides.set('sess-unpriced', sessionCaseOf('sess-unpriced', {
-      calls: 2, priced: 0, unpriced: 2, usd: 0, amount: 0, cost: null,
-      tokens: { input: 4_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 4_000 },
-      hitRate: null, models: [],
-    }))
-    // 形状漂移：老宿主没有 `total.tokens`
-    const noTokensNode = { calls: 1, priced: 1, unpriced: 0, usd: 0.2, amount: 1.5, cost: 1.5, hitRate: 0.5, models: [] }
-    sessionOverrides.set('sess-notokens', sessionCaseOf('sess-notokens', noTokensNode))
-    const unpricedHtml = await renderSession(composerSession, { sessionId: 'sess-unpriced' })
-    const noTokensHtml = await renderSafely(composerSession, { sessionId: 'sess-notokens' })
-    test('全部未定价的会话显示 —（不是 ¥0）', () => {
-      assert.ok(unpricedHtml.includes('本会话 —'), `全未定价应为 —：${unpricedHtml.slice(0, 200)}`)
-      assert.ok(!unpricedHtml.includes('¥0'), `不许画成 ¥0：${unpricedHtml.slice(0, 200)}`)
-      assert.ok(unpricedHtml.includes('2 笔未定价'), `未定价条数照旧要报：${unpricedHtml.slice(0, 200)}`)
-      return '— 而非 ¥0（与设置页会话表同判据）'
-    })
-    test('宿主没给 total.tokens（形状漂移）→ 不抛错', () => {
-      assert.ok(!noTokensHtml.startsWith('__THROW__'), `缺 tokens 不该抛：${noTokensHtml.slice(0, 200)}`)
-      assert.ok(noTokensHtml.includes('本会话 ¥1.5000'), `其余部分照常渲染：${noTokensHtml.slice(0, 200)}`)
-      return 'undefined tokens 也渲染得出来'
-    })
-    // 缺 token 数（宿主没给这一档）和「真的用了 0 个 token」是两回事：
-    // 前者画 —（与 formatAmount 同判据），后者才是 0 —— 别把缺值静默补成 0。
-    sessionOverrides.set('sess-zerotok', sessionCaseOf('sess-zerotok', {
-      calls: 1, priced: 1, unpriced: 0, usd: 0.2, amount: 1.5, cost: 1.5,
-      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
-      hitRate: 0.5, models: [],
-    }))
-    const zeroTokensHtml = await renderSafely(composerSession, { sessionId: 'sess-zerotok' })
-    test('token 缺值画 —、真 0 画 0（两回事）', () => {
-      assert.ok(noTokensHtml.includes('— tok'), `缺 tokens 应给 —：${noTokensHtml.slice(0, 200)}`)
-      assert.ok(!noTokensHtml.includes('0 tok'), `缺值不许画成 0：${noTokensHtml.slice(0, 200)}`)
-      assert.ok(zeroTokensHtml.includes('0 tok'), `真 0 仍画 0：${zeroTokensHtml.slice(0, 200)}`)
-      return '缺值 — · 真 0 → 0'
-    })
   } finally {
-    // 闸门一定要放掉：留着会让后面任何一次 /session 请求挂住（用例失败时也一样）
-    sessionGate = null
-    SIDEBAR.sessionCost = saved.sessionCost
     SIDEBAR.quotaStrip = saved.quotaStrip
     SIDEBAR.corner = saved.corner
+    SIDEBAR.modelCard = saved.modelCard
   }
   await reloadSidebar()
 })()
@@ -2363,35 +2106,35 @@ await (async () => {
     const enPage = mount(CostPage)
     const en = { html: render(enPage), texts: checkboxes(enPage).map(item => item.text) }
 
-    test('显示页：四个新分组标题 + 四段说明都渲染出来了', () => {
+    test('显示页：三个新分组标题 + 说明都渲染出来了', () => {
       assert.ok(zh.clicked, '点不到「显示」分页')
-      for (const needle of ['模型花费卡片', '本会话费用', '额度横条', '右下角角标']) {
+      for (const needle of ['模型花费卡片', '额度横条', '右下角角标']) {
         assert.ok(zh.html.includes(needle), `显示页缺少分组「${needle}」：${zh.html.slice(-400)}`)
       }
-      for (const needle of ['「近 90 天」读日汇总', '每 15 秒刷新一次', '峰谷档位与倒计时', '可选 Top-1 模型',
+      for (const needle of ['「近 90 天」读日汇总', '峰谷档位与倒计时', '可选 Top-1 模型',
         '接下来 6 个档位切换点']) {
         assert.ok(zh.html.includes(needle), `显示页缺少说明「${needle}」：${zh.html.slice(-400)}`)
       }
-      return '4 个标题 + 4 段说明'
+      assert.ok(!zh.html.includes('本会话费用'), '本会话费用设置项应已移除')
+      return '3 个标题 + 说明'
     })
-    test('显示页：12 个勾选框都有文案（空串 = 文案键还留在 S2 里）', () => {
+    test('显示页：9 个勾选框都有文案（空串 = 文案键还留在 S2 里）', () => {
       const labels = ['显示模型花费卡片', '默认展开', '记住展开状态', '显示 Token', '显示费用占比条',
-        '显示本会话费用', '显示缓存命中率', '包含子代理', '显示输入框上方的额度横条', '横条里也显示余额',
-        '显示右下角角标', '角标里带 Top-1 模型']
+        '显示输入框上方的额度横条', '横条里也显示余额', '显示右下角角标', '角标里带 Top-1 模型']
       const empty = zh.texts.filter(text => text.trim().length === 0)
       assert.deepEqual(empty, [], `有 ${empty.length} 个勾选框没有文案（文案键还在 S2 那张表里）`)
       for (const label of labels) {
         assert.ok(zh.texts.includes(label), `缺少勾选框「${label}」，实际：${zh.texts.join(' / ')}`)
       }
-      return `${zh.texts.length} 个勾选框 · 12 个新控件都有文案`
+      return `${zh.texts.length} 个勾选框 · 9 个新控件都有文案`
     })
     test('切到英文：同一批控件的英文文案也在（两份表都要挪）', () => {
-      for (const needle of ['Model cost card', 'This session', 'Quota strip', 'Corner badge']) {
+      for (const needle of ['Model cost card', 'Quota strip', 'Corner badge']) {
         assert.ok(en.html.includes(needle), `英文页缺少分组「${needle}」：${en.html.slice(-400)}`)
       }
+      assert.ok(!en.html.includes('This session'), '英文页也不该再有本会话费用设置')
       const labels = ['Show the model cost card', 'Expanded by default', 'Remember expanded state',
-        'Show tokens', 'Show cost share bars', 'Show this-session cost', 'Show cache hit rate',
-        'Include subagents', 'Show the strip above the input', 'Also show the balance in the strip',
+        'Show tokens', 'Show cost share bars', 'Show the strip above the input', 'Also show the balance in the strip',
         'Show the corner badge', 'Include the Top-1 model',
         'Show peak schedule & price table in the sidebar']
       const empty = en.texts.filter(text => text.trim().length === 0)
@@ -2479,7 +2222,7 @@ await (async () => {
 console.log('\n[侧栏：隐藏今日消耗的边界 / 角标只藏金额 / 横条倒计时自算]')
 await (async () => {
   const sidebar = component('sidebar.footer.action')
-  const strip = component('conversation.input.dock', 1).component
+  const strip = component('conversation.input.dock', 0).component
   const corner = component('conversation.composer.dock', 0).component
   const saved = {
     // 注意：不能用 `SIDEBAR.modelCard` —— 前面那节把它复位成了 `undefined`（见 MODEL_CARD_FIXTURE 注释）
