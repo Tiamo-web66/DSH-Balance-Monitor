@@ -48,7 +48,10 @@ const record = (atMs = Date.now()) => makeCallRecord({
 })
 
 console.log('\n[时区：负偏移（UTC-4）下的日期算术]')
-assert.equal(new Date().getTimezoneOffset(), 240, '这套必须在 UTC-4 下跑，否则测不出负偏移的错位')
+// 纽约有夏令时：夏季 240（UTC-4）/ 冬季 300（UTC-5）。这套用例要的是「负偏移」，
+// 不能把日期写死在夏令时那几个月，否则每年 11 月都会假失败。
+const nyOffset = new Date().getTimezoneOffset()
+assert.ok(nyOffset === 240 || nyOffset === 300, `这套必须在纽约时区（UTC-4 / UTC-5）下跑，实际偏移 ${nyOffset}`)
 const today = dayKey()
 
 test('addDays 是本地日历加减：往返自洽、跨月跨年正确', () => {
