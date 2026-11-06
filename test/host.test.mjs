@@ -1085,7 +1085,7 @@ await test('POST /config：保留期落盘并经报表回传', async () => {
 //   早先保留期拿到非法值是**回落默认**（那是 `usage-ledger.js` 的读盘契约），于是
 //   `{ledgerDays:'abc'}` 这种单个字段的笔误会把用户配好的 12/365 整块冲成 7/400，
 //   还连带把没提到的 rollupDays 一起改掉 —— 与 `ui` / `modelCard` / `peakNotify` /
-//   `sessionCost` 那几块的规矩（非法值沿用当前生效值、只有 `null` 才清空）不一致。
+//   `quotaStrip` / `corner` 那几块的规矩（非法值沿用当前生效值、只有 `null` 才清空）不一致。
 //   现在四块统一成同一套：**非法值沿用当前生效值；`null` / 空对象（= 两个键都没给）才清空回默认**。
 //   读盘侧仍是老规矩（`state.json` 里手写坏值 → 各字段回落默认），未受影响。
 await test('POST /config：保留期非法值沿用当前生效值、日汇总不短于明细、null / 空对象才清掉', async () => {
@@ -1365,14 +1365,12 @@ await test('关掉默认 true 的布尔 → 重启（重载 state.json）后仍�
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
   const saved = await call('POST', '/plugins/dsh-balance-monitor/config', {
     modelCard: { showTokens: false, rememberExpanded: false, enabled: true },
-    sessionCost: { showHitRate: false },
     quotaStrip: { showBalance: false },
   })
   assert.equal(saved.statusCode, 200)
   const stored = JSON.parse(readFileSync(file, 'utf8'))
   assert.deepEqual(stored.modelCard, { enabled: true, rememberExpanded: false, showTokens: false },
     `与默认不同的 false 必须落盘：${JSON.stringify(stored.modelCard)}`)
-  assert.deepEqual(stored.sessionCost, { showHitRate: false }, JSON.stringify(stored.sessionCost))
   assert.deepEqual(stored.quotaStrip, { showBalance: false }, JSON.stringify(stored.quotaStrip))
   // 重启 = 重新 apply（从磁盘重新读配置，走的是真实加载路径）
   mod.apply(makeCtx({ providers, settings }))
@@ -1380,9 +1378,8 @@ await test('关掉默认 true 的布尔 → 重启（重载 state.json）后仍�
   assert.equal(report.modelCard.enabled, true, '开着的那位要保住')
   assert.equal(report.modelCard.showTokens, false, '关掉 + 重启后不许被打回默认 true')
   assert.equal(report.modelCard.rememberExpanded, false, '关掉 + 重启后不许被打回默认 true')
-  assert.equal(report.sessionCost.showHitRate, false, '关掉 + 重启后不许被打回默认 true')
   assert.equal(report.quotaStrip.showBalance, false, '关掉 + 重启后不许被打回默认 true')
-  return 'modelCard 三位 + sessionCost / quotaStrip 各一位都活过重启'
+  return 'modelCard 三位 + quotaStrip 一位都活过重启'
 })
 await test('全默认的布尔提交上去 → state.json 不留多余键（读盘侧不凭空变出 false）', async () => {
   const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
@@ -1391,47 +1388,17 @@ await test('全默认的布尔提交上去 → state.json 不留多余键（读�
       enabled: false, defaultExpanded: false, rememberExpanded: true, showTokens: true, showShare: true,
       period: 'today', rows: 5, position: 'bottom',
     },
-    sessionCost: { enabled: false, position: 'dock', showHitRate: true, includeSubagent: false },
     quotaStrip: { enabled: false, showBalance: true },
   })
   assert.equal(res.statusCode, 200)
   const stored = JSON.parse(readFileSync(file, 'utf8'))
-  for (const key of ['modelCard', 'sessionCost', 'quotaStrip']) {
+  for (const key of ['modelCard', 'quotaStrip']) {
     assert.equal(stored[key], undefined, `${key} 与默认全同 → 文件里不留一条`)
   }
   // 清干净，别给后面的用例留状态
-  await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: null, sessionCost: null, quotaStrip: null })
+  await call('POST', '/plugins/dsh-balance-monitor/config', { modelCard: null, quotaStrip: null })
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).modelCard, undefined)
   return '全默认不留余键'
-})
-
-// `position` 的白名单在「读盘归一」与「局部补丁合并」两处各写一份 —— 只改一处，
-// 另一个方向就会把刚存的合法值静默丢掉（`dock` 是 0.9.0 新增的第四个位置：输入框下方，
-// 也是随包默认值）。这里两种写法都过一遍：非法值不冲掉生效值、非默认值能存能读。
-await test('sessionCost.position：dock 是新默认；composer 能存能读；非法值保持原值', async () => {
-  const file = join(sandbox, 'storages', 'dsh-balance-monitor', 'state.json')
-  const report = () => call('GET', '/plugins/dsh-balance-monitor/report').then(res => res.json.data)
-  // 随包默认 = dock（输入框下方），且默认值不落盘
-  await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: null })
-  assert.equal((await report()).sessionCost.position, 'dock', '默认位置应是 dock')
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost, undefined, '全默认不留条')
-  // 非默认的 position 必须落盘
-  const saved = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'composer' } })
-  assert.equal(saved.json.data.sessionCost.position, 'composer')
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost.position, 'composer',
-    '非默认的 position 必须落盘（否则重启即丢）')
-  // 重启 = 重新 apply（真实加载路径）
-  mod.apply(makeCtx({ providers, settings }))
-  const afterRestart = (await callOn(routes.at(-1), 'GET', '/plugins/dsh-balance-monitor/report')).json.data
-  assert.equal(afterRestart.sessionCost.position, 'composer', 'composer 要活过重启')
-  // 非法值（老客户端 / 手改文件）不许把生效值冲掉
-  const junk = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'bottom' } })
-  assert.equal(junk.json.data.sessionCost.position, 'composer', '不认识的 position 保持原值')
-  // 显式切回 dock（= 默认）→ 文件里不留条，但生效值就是 dock
-  const back = await call('POST', '/plugins/dsh-balance-monitor/config', { sessionCost: { position: 'dock' } })
-  assert.equal(back.json.data.sessionCost.position, 'dock')
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessionCost, undefined, '回到默认不留条')
-  return 'dock 默认 · composer 存读通 · 非法保持'
 })
 
 await test('侧栏也带预算进度（横条那格），与设置页概览同一套规则', async () => {
@@ -2046,38 +2013,19 @@ await test('喂两条不同模型的调用 → heatmap / modelsHistory 都对上
   return `182 天热力图 · ${data.modelsHistory.rows.length} 个模型 · 明细可加总`
 })
 
-console.log('\n[本会话费用：/session 路由]')
-await test('GET /session：自身 / 子代理 / 合计，子代理要显式开', async () => {
-  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-parent', inputTokens: 1_000_000 })
-  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-child', parentSessionId: 'sess-parent', inputTokens: 500_000 })
-  await feedStream({ provider: 'walk-grok', model: 'cn:deepseek-v4.1-flash', sessionId: 'sess-unrelated', inputTokens: 2_000_000 })
-  const off = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-parent')).json.data
-  assert.equal(off.sessionId, 'sess-parent')
-  assert.equal(off.includeSubagent, false)
-  assert.equal(off.self.calls, 1)
-  assert.equal(off.children.calls, 0, '关着时不算子代理')
-  assert.equal(off.total.calls, 1)
-  assert.equal(off.subagentSupported, true, '有带 parentSessionId 的记录 → 归属可用')
-  assert.ok(typeof off.self.amount !== 'undefined', '金额按展示币种给字符串')
-  assert.equal(off.total.cost !== undefined, true)
-  const on = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-parent&includeSubagent=1')).json.data
-  assert.equal(on.includeSubagent, true)
-  assert.equal(on.children.calls, 1, '子代理那次要算进来')
-  assert.equal(on.total.calls, 2)
-  assert.ok(on.total.usd > off.total.usd, '合计金额应更大')
-  assert.equal(on.total.tokens.total, on.self.tokens.total + on.children.tokens.total, 'token 桶相加')
-  assert.ok(on.total.models.length >= 1, '给 Top 模型')
-  // 无关会话不串味
-  const other = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-unrelated&includeSubagent=1')).json.data
-  assert.equal(other.total.calls, 1)
-  // 未知会话：200 但全 0（界面显示 0 / —），不是错误
-  const none = (await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=does-not-exist')).json.data
-  assert.equal(none.total.calls, 0)
-  assert.equal(none.total.cost, null, '没有调用时金额是 null（不是 0）')
-  // 缺 sessionId → 400；方法不对 → 405
-  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/session')).statusCode, 400)
-  assert.equal((await call('POST', '/plugins/dsh-balance-monitor/session', { sessionId: 'sess-parent' })).statusCode, 405)
-  return 'self 1 + 子代理 1 = 2 · 未知会话 0 · 缺参 400'
+console.log('\n[会话费用展示已移除：不再暴露 /session]')
+await test('会话区的 token / 花费接口与配置都已移除', async () => {
+  // 客户端已不再注册会话槽位；宿主也不该再留一个没人用的接口或下发死配置。
+  assert.equal((await call('GET', '/plugins/dsh-balance-monitor/session?sessionId=sess-parent')).statusCode, 404)
+  const report = (await call('GET', '/plugins/dsh-balance-monitor/report')).json.data
+  const sidebar = (await call('GET', '/plugins/dsh-balance-monitor/sidebar')).json.data
+  assert.equal('sessionCost' in report, false, 'report 不该再下发 sessionCost')
+  assert.equal('sessionCost' in sidebar, false, 'sidebar 不该再下发 sessionCost')
+  const patched = await call('POST', '/plugins/dsh-balance-monitor/config', {
+    sessionCost: { enabled: true },
+  })
+  assert.equal('sessionCost' in patched.json.data, false, 'config 不该再回显 sessionCost')
+  return '404 · report / sidebar / config 均无 sessionCost'
 })
 
 console.log('\n[历史数据：清空 / 导入探测]')
