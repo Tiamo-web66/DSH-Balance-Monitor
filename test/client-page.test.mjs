@@ -2882,6 +2882,14 @@ await (async () => {
     assert.equal(host.nextElementSibling, listArea)
     return '进行中 / 待查看'
   })
+  test('轨道标题、列表行与分段之间留出独立悬浮间距', () => {
+    const style = head.children.find(tag => tag.dataset.pluginCss?.includes('running-rail.css'))
+    assert.ok(style !== undefined)
+    assert.match(style.textContent, /\.dsh-bm-rr\{[^}]*display:flex;[^}]*flex-direction:column;[^}]*gap:4px;/)
+    assert.match(style.textContent, /\.dsh-bm-rr-row\{[^}]*height:34px;/)
+    assert.match(style.textContent, /\.dsh-bm-rr \+ \.dsh-bm-rr\{margin-top:4px\}/)
+    return '分段间距 4px · 行高 34px'
+  })
   test('待查看行用绿点 + 标题 + 工作区，aria-label 带「已完成，待查看」', () => {
     const section = host.children[1]
     const row = section.children[1]
